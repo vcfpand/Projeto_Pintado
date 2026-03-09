@@ -87,7 +87,7 @@ RACAO_INICIAL = {"T00": 14.74, "T10": 12.58, "T20": 12.90, "T30": 13.51}
 DIAS_TOTAIS = 46      
 
 # Cache ajustável com refresh manual
-CACHE_TTL = 120  # 2 minutos (reduzido de 5)
+CACHE_TTL = 120  # 2 minutos
 
 @st.cache_data(ttl=CACHE_TTL)
 def load_data():
@@ -160,10 +160,8 @@ def remove_outliers_zscore(df_in, colunas_alvo, limite_z=3):
     linhas_antes = len(df_limpo)
     
     for col in colunas_alvo:
-        # Apenas processa se a coluna tiver dados e variância
         if df_limpo[col].notna().any() and df_limpo[col].std() > 0:
             z_scores = np.abs((df_limpo[col] - df_limpo[col].mean()) / df_limpo[col].std())
-            # Mantém as linhas onde o Z-score é menor que o limite OU a célula original era NaN
             df_limpo = df_limpo[(z_scores < limite_z) | (df_limpo[col].isna())]
     
     linhas_removidas = linhas_antes - len(df_limpo)
@@ -185,7 +183,6 @@ if df is not None:
     # ==========================================
     st.sidebar.header("⚙️ Configurações Globais")
     
-    # Botão de refresh de dados
     if st.sidebar.button("🔄 Recarregar Dados", help="Força recarga dos dados do OneDrive"):
         st.cache_data.clear()
         st.rerun()
@@ -203,7 +200,6 @@ if df is not None:
     
     trat_sel = st.sidebar.multiselect("Tratamentos", ["T00", "T10", "T20", "T30"], default=["T00", "T10", "T20", "T30"])
 
-    # ✅ ORDEM CORRIGIDA: Aplicar filtro ANTES dos cálculos
     if remover_outliers:
         colunas_para_limpar = ['ph', 'temp', 'od', 'cond', 'amonia', 'nitrito', 'consumo']
         df = remove_outliers_zscore(df, colunas_para_limpar)
@@ -214,9 +210,12 @@ if df is not None:
     # ---------------------------------------------------------
     df_unico_dia = df.drop_duplicates(subset=['caixa', 'dia_exp']).copy()
     
+    # ✅ CORREÇÃO PANDAS: Preencher NaN antes de agrupar o consumo e a mortalidade
     df_unico_dia['consumo_preenchido'] = df_unico_dia['consumo'].fillna(0)
     df_unico_dia['consumo_acum'] = df_unico_dia.groupby('caixa')['consumo_preenchido'].cumsum()
-    df_unico_dia['mort_acum'] = df_unico_dia.groupby('caixa')['mort'].fillna(0).cumsum()
+    
+    df_unico_dia['mort_preenchida'] = df_unico_dia['mort'].fillna(0)
+    df_unico_dia['mort_acum'] = df_unico_dia.groupby('caixa')['mort_preenchida'].cumsum()
 
     # Devolve as somas cumulativas para o df principal
     df = pd.merge(df, df_unico_dia[['caixa', 'dia_exp', 'consumo_acum', 'mort_acum']], on=['caixa', 'dia_exp'], how='left')
@@ -250,7 +249,6 @@ if df is not None:
 
     dias_sel = st.sidebar.slider("Filtro de Dias", 0, dia_max_preenchido, (0, dia_max_preenchido))
     
-    # Remove NaN dos gráficos
     df_f = df[(df['tratamento'].isin(trat_sel)) & (df['dia_exp'].between(dias_sel[0], dias_sel[1]))].dropna(
         subset=['dia_exp', 'tratamento']
     )
@@ -265,7 +263,6 @@ if df is not None:
     
     for i, trat in enumerate(trat_sel):
         d_trat = df_f[df_f['tratamento'] == trat]
-        # Garante que os cálculos diários não têm linhas duplicadas
         d_trat_unico = d_trat.drop_duplicates(subset=['caixa', 'dia_exp'])
         
         d_ontem = d_trat_unico[d_trat_unico['dia_exp'] == (dias_sel[1] - 1)] if dias_sel[1] > 0 else pd.DataFrame()
@@ -299,11 +296,9 @@ if df is not None:
                 st.divider()
                 st.metric("Consumo Total Acumulado", f"{cons_acumulado:.0f} g")
                 
-                # --- NOVO LAYOUT DO CONSUMO LADO A LADO ---
                 col_ontem, col_hoje = st.columns(2)
                 col_ontem.metric("Consumo Ontem", f"{cons_ontem:.0f} g")
                 col_hoje.metric("Consumo Hoje", f"{cons_hoje:.0f} g", f"{delta_cons:.1f}%", delta_color="normal")
-                # -------------------------------------------
                 
                 st.divider()
                 st.metric("Ração Disp. (kg)", f"{est_restante_kg:.2f}")

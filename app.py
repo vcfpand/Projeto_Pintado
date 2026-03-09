@@ -15,13 +15,12 @@ client = None
 try:
     from google import genai
     if "GEMINI_API_KEY" in st.secrets:
-        # Inicia o cliente com a chave do cofre do Streamlit
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
         usa_gemini = True
 except ImportError:
-    st.sidebar.warning("⚠️ Biblioteca 'google-genai' não instalada. O relatório de IA está desativado.")
+    st.sidebar.warning("⚠️ Biblioteca 'google-genai' não instalada.")
 except Exception as e:
-    st.sidebar.warning(f"⚠️ Erro ao configurar Gemini: {e}")
+    st.sidebar.warning(f"⚠️ Erro Gemini: {e}")
 
 # ==========================================
 # 1. LOGIN SIMPLES E SEGURO
@@ -59,7 +58,7 @@ def load_data():
         resp = requests.get(url)
         
         if resp.status_code != 200:
-            st.error("Erro ao baixar planilha do Google Drive. Verifique o link.")
+            st.error("Erro ao baixar planilha. Verifique o link.")
             return None
 
         xls = BytesIO(resp.content)
@@ -67,7 +66,6 @@ def load_data():
         xls.seek(0)
         df_b = pd.read_excel(xls, sheet_name="Biometrias", engine='openpyxl')
         
-        # Limpeza Básica
         df_d.columns = [c.strip().lower() for c in df_d.columns]
         df_b.columns = [c.strip().lower() for c in df_b.columns]
         
@@ -120,18 +118,16 @@ if df is not None:
     st.progress(min(dia_max_preenchido / DIAS_TOTAIS, 1.0))
     st.divider()
 
-    # Filtro de Dias para os painéis
-    dias_sel = st.sidebar.slider("Filtro de Dias (Painéis)", 0, dia_max_preenchido, (0, dia_max_preenchido))
+    dias_sel = st.sidebar.slider("Filtro de Dias", 0, dia_max_preenchido, (0, dia_max_preenchido))
     df_f = df[(df['tratamento'].isin(trat_sel)) & (df['dia_exp'].between(dias_sel[0], dias_sel[1]))]
 
     # ==========================================
-    # CARDS DE DESEMPENHO DIÁRIO
+    # CARDS DE DESEMPENHO (KPIs Completos)
     # ==========================================
-    st.subheader(f"📊 Relatório de Operação (Dia {dias_sel[0]} a {dias_sel[1]})")
+    st.subheader(f"📊 Desempenho Zootécnico (Dia {dias_sel[0]} a {dias_sel[1]})")
     
     cols = st.columns(len(trat_sel)) if trat_sel else []
-    
-    dados_gemini = {} # Dicionário para alimentar a IA
+    dados_gemini = {} 
     
     for i, trat in enumerate(["T00", "T10", "T20", "T30"]):
         if trat in trat_sel:
@@ -139,7 +135,6 @@ if df is not None:
             d_ontem = d_trat[d_trat['dia_exp'] == (dias_sel[1] - 1)] if dias_sel[1] > 0 else pd.DataFrame()
             d_hoje = d_trat[d_trat['dia_exp'] == dias_sel[1]]
             
-            # Médias de Água
             m_ph = d_trat['ph'].mean()
             m_temp = d_trat['temp'].mean()
             m_od = d_trat['od'].mean()
@@ -147,68 +142,84 @@ if df is not None:
             m_amonia = d_trat['amonia'].mean()
             m_nitrito = d_trat['nitrito'].mean()
             
-            # Consumo
             cons_acumulado = d_trat['consumo'].sum()
             cons_hoje = d_hoje['consumo'].sum() if not d_hoje.empty else 0
             cons_ontem = d_ontem['consumo'].sum() if not d_ontem.empty else 0
             
-            delta_cons = 0
-            if cons_ontem > 0:
-                delta_cons = ((cons_hoje - cons_ontem) / cons_ontem) * 100
+            delta_cons = ((cons_hoje - cons_ontem) / cons_ontem * 100) if cons_ontem > 0 else 0
                 
-            # Estoque e Mort.
             est_restante_kg = RACAO_INICIAL[trat] - (cons_acumulado / 1000)
             mort_total = d_trat['mort'].sum()
             
-            # Guarda info pro Gemini
-            dados_gemini[trat] = {"Consumo_g": cons_hoje, "Var_Consumo_%": delta_cons, "Mort": mort_total, "Amonia": m_amonia}
+            dados_gemini[trat] = {"Consumo": cons_hoje, "Var_%": delta_cons, "Mort": mort_total, "Amonia": m_amonia, "OD": m_od}
             
             with cols[i]:
-                st.markdown(f"### **{trat}**")
                 with st.container(border=True):
-                    st.markdown("**💧 Qualidade de Água (Médias):**")
-                    st.write(f"pH: {m_ph:.2f} | Temp: {m_temp:.1f}°C")
-                    st.write(f"OD: {m_od:.2f} | Cond: {m_cond:.1f}")
-                    st.write(f"Amonia: {m_amonia:.3f} | Nitrito: {m_nitrito:.3f}")
+                    st.markdown(f"<h3 style='text-align: center; color: #4DA8DA;'>{trat}</h3>", unsafe_allow_html=True)
+                    st.markdown("**Médias Ambientais:**")
+                    st.write(f"🧪 pH: **{m_ph:.2f}** | 🌡️ Temp: **{m_temp:.1f}**")
+                    st.write(f"🫧 OD: **{m_od:.2f}** | ⚡ Cond: **{m_cond:.1f}**")
+                    st.write(f"☣️ Amônia: **{m_amonia:.3f}** | ☠️ Nitrito: **{m_nitrito:.3f}**")
                     st.divider()
-                    st.metric("Consumo Acumulado (g)", f"{cons_acumulado:.0f}")
-                    st.metric("Consumo Diário", f"{cons_hoje:.0f} g", f"{delta_cons:.1f}% vs ontem", delta_color="normal")
+                    st.metric("Consumo Total (g)", f"{cons_acumulado:.0f}")
+                    st.metric("Consumo Diário", f"{cons_hoje:.0f} g", f"{delta_cons:.1f}%", delta_color="normal")
                     st.divider()
-                    st.metric("Ração Restante (kg)", f"{est_restante_kg:.2f}")
-                    st.metric("Mortalidade (Período)", f"{int(mort_total)}")
+                    st.metric("Ração Disp. (kg)", f"{est_restante_kg:.2f}")
+                    st.metric("Mortalidade Total", f"{int(mort_total)}")
 
     # ==========================================
-    # ANÁLISE GERAL (GEMINI) - SINTAXE NOVA
+    # ANÁLISE GERAL (GEMINI IA)
     # ==========================================
     if usa_gemini and client is not None:
         with st.container(border=True):
-            st.markdown("#### 🤖 Análise Zootécnica Geral (IA)")
-            if st.button("Gerar Relatório de Desempenho", type="primary"):
-                with st.spinner("Analisando as médias do período através do Gemini..."):
-                    prompt = f"""Atue como um Zootecnista responsável por um ensaio de nutrição com juvenis de Pintado. 
-                    Analise os dados sumarizados do último dia selecionado: {dados_gemini}.
-                    Escreva 2 parágrafos. O primeiro sobre a aceitação da dieta (avaliando as variações percentuais de consumo de ontem para hoje). O segundo sobre riscos ambientais, correlacionando mortalidade com possíveis níveis de amônia apresentados. Seja técnico e objetivo."""
+            st.markdown("#### 🧠 Análise Geral do Experimento (Google Gemini)")
+            if st.button("Gerar Relatório Zootécnico Diário", type="primary"):
+                with st.spinner("Analisando os dados coletados..."):
+                    prompt = f"""Atue como um Especialista em Aquicultura. Analise os seguintes dados do último dia avaliado para os 4 tratamentos: {dados_gemini}.
+                    Produza uma análise direta em 2 parágrafos:
+                    1. Avalie a resposta alimentar (olhando para a variação % de consumo entre os dias). Algum tratamento reduziu o consumo abruptamente?
+                    2. Avalie a sanidade e o ambiente. Há alguma correlação aparente entre as taxas de amônia/OD e a mortalidade registrada?
+                    Responda de forma profissional e objetiva."""
                     
                     try:
-                        # Utilizando o novo formato do SDK google-genai
                         resposta = client.models.generate_content(
                             model="gemini-3-flash-preview",
                             contents=prompt
                         )
                         st.info(resposta.text)
                     except Exception as err:
-                        st.error(f"Erro ao contatar API do Gemini: {err}")
-    else:
-        st.info("💡 A Inteligência Artificial está desativada. Instale 'google-genai' e configure a chave nos Secrets.")
+                        st.error(f"Erro na API: {err}")
 
     st.divider()
 
     # ==========================================
-    # 4. GRÁFICOS DIRETOS AO PONTO
+    # ABAS E GRÁFICOS
     # ==========================================
-    tab1, tab2, tab3 = st.tabs(["📈 Zootecnia", "🧪 Água", "🔬 Estatística & Estoque"])
+    tab1, tab2, tab3 = st.tabs(["📈 Zootecnia", "🧪 Água", "🔬 Estatística"])
 
     with tab1:
-        c1, c2 = st.columns(2)
-        c1.plotly_chart(px.line(df_f, x="dia_exp", y="peso_est", color="tratamento", title="Curva de Crescimento (g)", template="plotly_dark"), use_container_width=True)
-        c2.plotly_chart(px.line(df_f, x="dia_exp", y="caa_est", color="tratamento", title="Conversão Alimentar (CAA)", template="plotly_
+        st.subheader("Desempenho Biológico")
+        c1, c2, c3 = st.columns(3)
+        c1.plotly_chart(px.line(df_f, x="dia_exp", y="peso_est", color="tratamento", title="Peso (g)", template="plotly_dark"), use_container_width=True)
+        c2.plotly_chart(px.line(df_f, x="dia_exp", y="caa_est", color="tratamento", title="CAA Estimada", template="plotly_dark"), use_container_width=True)
+        c3.plotly_chart(px.line(df_f, x="dia_exp", y="biomassa_est_g", color="tratamento", title="Biomassa (g)", template="plotly_dark"), use_container_width=True)
+
+    with tab2:
+        st.subheader("Evolução dos Parâmetros Físico-Químicos")
+        param_list = ['temp', 'od', 'amonia', 'nitrito', 'ph', 'cond']
+        
+        for i in range(0, len(param_list), 3):
+            cols_agua = st.columns(3)
+            for j in range(3):
+                if i + j < len(param_list):
+                    p = param_list[i+j]
+                    cols_agua[j].plotly_chart(px.line(df_f.groupby(['dia_exp','tratamento'])[p].mean().reset_index(), x="dia_exp", y=p, color="tratamento", title=p.upper(), template="plotly_dark", markers=True), use_container_width=True)
+
+    with tab3:
+        st.subheader("Correlação Ambiental e Comportamental")
+        c_est1, c_est2 = st.columns(2)
+        with c_est1:
+            p_corr = st.selectbox("Eixo X (Parâmetro):", ['amonia', 'od', 'temp', 'ph'])
+            st.plotly_chart(px.scatter(df_f, x=p_corr, y="taxa_arracoamento", color="tratamento", trendline="ols", title=f"Impacto do {p_corr.upper()} no Apetite (%PV)", template="plotly_dark"), use_container_width=True)
+        with c_est2:
+            st.write("Esta análise de regressão demonstra como variações pontuais na qualidade da água afetam a voracidade (consumo em relação à biomassa) dos peixes em cada tratamento.")

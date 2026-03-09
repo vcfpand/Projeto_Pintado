@@ -210,10 +210,10 @@ if df is not None:
     # ---------------------------------------------------------
     df_unico_dia = df.drop_duplicates(subset=['caixa', 'dia_exp']).copy()
     
-    # ✅ CORREÇÃO PANDAS: Preencher NaN antes de agrupar o consumo e a mortalidade
     df_unico_dia['consumo_preenchido'] = df_unico_dia['consumo'].fillna(0)
     df_unico_dia['consumo_acum'] = df_unico_dia.groupby('caixa')['consumo_preenchido'].cumsum()
     
+    # RESOLVIDO ERRO DE FILLNA APÓS GROUPBY DA MORTALIDADE:
     df_unico_dia['mort_preenchida'] = df_unico_dia['mort'].fillna(0)
     df_unico_dia['mort_acum'] = df_unico_dia.groupby('caixa')['mort_preenchida'].cumsum()
 
@@ -254,7 +254,7 @@ if df is not None:
     )
 
     # ==========================================
-    # CARDS DE DESEMPENHO (KPIs Completos)
+    # CARDS DE DESEMPENHO (KPIs INTELIGENTES)
     # ==========================================
     st.subheader(f"📊 Desempenho Zootécnico (Dia {dias_sel[0]} a {dias_sel[1]})")
     
@@ -265,9 +265,23 @@ if df is not None:
         d_trat = df_f[df_f['tratamento'] == trat]
         d_trat_unico = d_trat.drop_duplicates(subset=['caixa', 'dia_exp'])
         
-        d_ontem = d_trat_unico[d_trat_unico['dia_exp'] == (dias_sel[1] - 1)] if dias_sel[1] > 0 else pd.DataFrame()
-        d_hoje = d_trat_unico[d_trat_unico['dia_exp'] == dias_sel[1]]
+        # --- LÓGICA DO ÚLTIMO DIA REAL COM CONSUMO PREENCHIDO ---
+        df_trat_consumo = d_trat_unico.dropna(subset=['consumo'])
         
+        if not df_trat_consumo.empty:
+            ultimo_dia_com_dados = df_trat_consumo['dia_exp'].max()
+            dia_anterior = df_trat_consumo[df_trat_consumo['dia_exp'] < ultimo_dia_com_dados]['dia_exp'].max()
+            
+            d_hoje = df_trat_consumo[df_trat_consumo['dia_exp'] == ultimo_dia_com_dados]
+            d_ontem = df_trat_consumo[df_trat_consumo['dia_exp'] == dia_anterior] if pd.notna(dia_anterior) else pd.DataFrame()
+            dia_ref = f"(Ref: Dia {int(ultimo_dia_com_dados)})"
+        else:
+            d_hoje = pd.DataFrame()
+            d_ontem = pd.DataFrame()
+            dia_ref = "(Sem Dados de Consumo)"
+        # --------------------------------------------------------
+        
+        # As médias ambientais são calculadas para todo o intervalo selecionado no slider
         m_ph = d_trat['ph'].mean()
         m_temp = d_trat['temp'].mean()
         m_od = d_trat['od'].mean()
@@ -284,7 +298,7 @@ if df is not None:
         est_restante_kg = RACAO_INICIAL.get(trat, 0) - (cons_acumulado / 1000)
         mort_total = d_trat_unico.groupby('caixa')['mort_acum'].max().sum() if not d_trat_unico.empty else 0
         
-        dados_gemini[trat] = {"Consumo_Ontem": cons_ontem, "Consumo_Hoje": cons_hoje, "Var_%": delta_cons, "Mort": mort_total, "Amonia": m_amonia, "OD": m_od}
+        dados_gemini[trat] = {"Consumo_Ultimo_Dia": cons_hoje, "Consumo_Dia_Anterior": cons_ontem, "Var_%": delta_cons, "Mort": mort_total, "Amonia": m_amonia, "OD": m_od}
         
         with cols[i]:
             with st.container(border=True):
@@ -296,9 +310,10 @@ if df is not None:
                 st.divider()
                 st.metric("Consumo Total Acumulado", f"{cons_acumulado:.0f} g")
                 
+                st.write(f"**Últimos Lançamentos {dia_ref}**")
                 col_ontem, col_hoje = st.columns(2)
-                col_ontem.metric("Consumo Ontem", f"{cons_ontem:.0f} g")
-                col_hoje.metric("Consumo Hoje", f"{cons_hoje:.0f} g", f"{delta_cons:.1f}%", delta_color="normal")
+                col_ontem.metric("Consumo Anterior", f"{cons_ontem:.0f} g")
+                col_hoje.metric("Último Consumo", f"{cons_hoje:.0f} g", f"{delta_cons:.1f}%", delta_color="normal")
                 
                 st.divider()
                 st.metric("Ração Disp. (kg)", f"{est_restante_kg:.2f}")
@@ -312,9 +327,9 @@ if df is not None:
             st.markdown("#### 🧠 Análise Geral do Experimento (Google Gemini)")
             if st.button("Gerar Relatório Zootécnico Diário", type="primary"):
                 with st.spinner("Analisando os dados coletados..."):
-                    prompt = f"""Atue como um Especialista em Aquicultura. Analise os seguintes dados do último dia avaliado para os tratamentos com juvenis de Pintado: {dados_gemini}.
+                    prompt = f"""Atue como um Especialista em Aquicultura. Analise os seguintes dados referentes à última medição dos tratamentos com juvenis de Pintado: {dados_gemini}.
                     Produza uma análise direta em 2 parágrafos:
-                    1. Avalie a resposta alimentar (olhando para a variação % de consumo entre os dias). Algum tratamento reduziu o consumo abruptamente?
+                    1. Avalie a resposta alimentar comparando o consumo do dia anterior com a última medição. Algum tratamento reduziu o consumo abruptamente?
                     2. Avalie a sanidade e o ambiente. Há alguma correlação aparente entre as taxas de amônia/OD e a mortalidade registrada?
                     Responda de forma profissional, acadêmica e objetiva."""
                     
@@ -341,7 +356,7 @@ if df is not None:
         c1, c2, c3 = st.columns(3)
         
         try:
-            c1.plotly_chart(px.line(df_f, x="dia_exp", y="peso_est", color="tratamento", title="Peso (g)", template="plotly_dark"), use_container_width=True)
+            c1.plotly_chart(px.line(df_f, x="dia_exp", y="peso_est", color="tratamento", title="Peso Projetado (g)", template="plotly_dark"), use_container_width=True)
             c2.plotly_chart(px.line(df_f, x="dia_exp", y="caa_est", color="tratamento", title="CAA Estimada", template="plotly_dark"), use_container_width=True)
             c3.plotly_chart(px.line(df_f, x="dia_exp", y="biomassa_est_g", color="tratamento", title="Biomassa (g)", template="plotly_dark"), use_container_width=True)
         except Exception as e:

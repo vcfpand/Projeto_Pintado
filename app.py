@@ -111,9 +111,18 @@ ALERTAS_AGUA = {
     "temp":    {"min": 24.0, "max": 30.0, "label": "Temperatura (°C)"},
 }
 
-# Limite seguro de NH₃ tóxica para Pintado (estresse crônico / danos branquiais)
-NH3_LIMITE_ALERTA  = 0.02   # mg/L — alerta amarelo
-NH3_LIMITE_CRITICO = 0.05   # mg/L — alerta vermelho
+# Faixas de NH₃ tóxica (não ionizada) para Pintado — baseado na tabela de Emerson et al. (1975)
+# Cores extraídas da tabela de referência (verde → amarelo → laranja → vermelho)
+# < 0.02  → 🟢 Seguro    (zona verde da tabela)
+# 0.02–0.05 → 🟡 Atenção  (zona amarela)
+# 0.05–0.10 → 🟠 Crítico  (zona laranja/rosa)
+# ≥ 0.10  → 🔴 Perigoso  (zona vermelha)
+NH3_SEGURO   = 0.02   # mg/L
+NH3_ATENCAO  = 0.05   # mg/L
+NH3_CRITICO  = 0.10   # mg/L
+# Aliases mantidos por compatibilidade com card KPI
+NH3_LIMITE_ALERTA  = NH3_SEGURO
+NH3_LIMITE_CRITICO = NH3_CRITICO
 
 # Faixas de nitrito (NO₂⁻) para Pintado
 # 0.00       → Ideal   (verde)
@@ -265,26 +274,40 @@ def calcular_alertas(df_trat: pd.DataFrame) -> list[dict]:
     if not ult_amonia.empty:
         amonia_val = ult_amonia["amonia"].iloc[-1]
         dia_ref    = int(ult_amonia["dia_exp"].iloc[-1])
-        ph_val     = ult_ph["ph"].iloc[-1]   if not ult_ph.empty   else float("nan")
-        temp_val   = ult_temp["temp"].iloc[-1] if not ult_temp.empty else float("nan")
+        ph_val     = ult_ph["ph"].iloc[-1]    if not ult_ph.empty    else float("nan")
+        temp_val   = ult_temp["temp"].iloc[-1] if not ult_temp.empty  else float("nan")
 
         nh3 = calcular_nh3_toxica(amonia_val, ph_val, temp_val)
 
         if pd.notna(nh3):
-            if nh3 >= NH3_LIMITE_CRITICO:
-                alertas.append({
-                    "param": f"NH₃ Tóxica (Dia {dia_ref})",
-                    "valor": nh3, "tipo": "🔴 CRÍTICO",
-                    "limite": NH3_LIMITE_CRITICO, "nh3": True,
-                    "amonia_total": amonia_val, "ph_ref": ph_val, "temp_ref": temp_val,
-                })
-            elif nh3 >= NH3_LIMITE_ALERTA:
-                alertas.append({
-                    "param": f"NH₃ Tóxica (Dia {dia_ref})",
-                    "valor": nh3, "tipo": "⚠️ ATENÇÃO",
-                    "limite": NH3_LIMITE_ALERTA, "nh3": True,
-                    "amonia_total": amonia_val, "ph_ref": ph_val, "temp_ref": temp_val,
-                })
+            if nh3 >= NH3_CRITICO:
+                tipo_nh3  = "🔴 PERIGOSO"
+                nivel_nh3 = "perigoso"
+                faixa_nh3 = f"≥ {NH3_CRITICO} mg/L"
+            elif nh3 >= NH3_ATENCAO:
+                tipo_nh3  = "🟠 CRÍTICO"
+                nivel_nh3 = "critico"
+                faixa_nh3 = f"{NH3_ATENCAO}–{NH3_CRITICO} mg/L"
+            elif nh3 >= NH3_SEGURO:
+                tipo_nh3  = "🟡 ATENÇÃO"
+                nivel_nh3 = "atencao"
+                faixa_nh3 = f"{NH3_SEGURO}–{NH3_ATENCAO} mg/L"
+            else:
+                tipo_nh3  = "🟢 SEGURO"
+                nivel_nh3 = "seguro"
+                faixa_nh3 = f"< {NH3_SEGURO} mg/L"
+
+            alertas.append({
+                "param":        f"NH₃ Tóxica (Dia {dia_ref})",
+                "valor":        nh3,
+                "tipo":         tipo_nh3,
+                "nivel":        nivel_nh3,
+                "faixa":        faixa_nh3,
+                "nh3":          True,
+                "amonia_total": amonia_val,
+                "ph_ref":       ph_val,
+                "temp_ref":     temp_val,
+            })
 
     return alertas
 
@@ -408,15 +431,19 @@ if trat_sel:
                 st.markdown(f"**{trat}**")
                 for a in alertas:
                     if a.get("nh3"):
-                        # Alerta especial com contexto da fórmula de Emerson
-                        linha1 = f"{a['tipo']} — **{a['param']}**: `{a['valor']:.4f} mg/L` (limite: {a['limite']} mg/L)"
-                        linha2 = f"Calculada com: NH₄⁺ Total = `{a['amonia_total']:.3f}` | pH = `{a['ph_ref']:.2f}` | Temp = `{a['temp_ref']:.1f} °C`"
-                        linha3 = "Ref: Emerson et al. (1975) — pKa = 0.09018 + 2729.92 / (T + 273.15)"
-                        msg = linha1 + "  \n" + linha2 + "  \n" + linha3
-                        if "CRÍTICO" in a["tipo"]:
-                            st.error(msg)
+                        linha1 = f"{a['tipo']} — **{a['param']}**: `{a['valor']:.4f} mg/L` — Faixa: {a['faixa']}"
+                        linha2 = f"Calculada com: NH₄⁺ Total = `{a['amonia_total']:.3f} mg/L` | pH = `{a['ph_ref']:.2f}` | Temp = `{a['temp_ref']:.1f} °C`"
+                        linha3 = "Ref: Emerson et al. (1975) | Escala: 🟢 <0.02 Seguro | 🟡 0.02–0.05 Atenção | 🟠 0.05–0.10 Crítico | 🔴 ≥0.10 Perigoso"
+                        msg_nh3 = linha1 + "  \n" + linha2 + "  \n" + linha3
+                        nivel_nh3 = a.get("nivel", "seguro")
+                        if nivel_nh3 == "perigoso":
+                            st.error(msg_nh3)
+                        elif nivel_nh3 == "critico":
+                            st.warning(msg_nh3)
+                        elif nivel_nh3 == "atencao":
+                            st.info(msg_nh3)
                         else:
-                            st.warning(msg)
+                            st.success(msg_nh3)
                     elif a.get("nitrito"):
                         msg_nit = (
                             f"{a['tipo']} — **{a['param']}**: `{a['valor']:.3f} mg/L`  \n"

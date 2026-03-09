@@ -105,12 +105,15 @@ CACHE_TTL = 120  # segundos
 
 # Limites de alerta para qualidade da água
 ALERTAS_AGUA = {
-    "amonia":  {"max": 0.5,  "label": "Amônia (mg/L)"},
     "nitrito": {"max": 0.1,  "label": "Nitrito (mg/L)"},
     "od":      {"min": 5.0,  "label": "OD (mg/L)"},
     "ph":      {"min": 6.5,  "max": 8.5, "label": "pH"},
     "temp":    {"min": 24.0, "max": 30.0, "label": "Temperatura (°C)"},
 }
+
+# Limite seguro de NH₃ tóxica para Pintado (estresse crônico / danos branquiais)
+NH3_LIMITE_ALERTA  = 0.02   # mg/L — alerta amarelo
+NH3_LIMITE_CRITICO = 0.05   # mg/L — alerta vermelho
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner="Carregando dados do OneDrive...")
 def load_data() -> pd.DataFrame | None:
@@ -173,9 +176,30 @@ def remove_outliers_zscore(df_in: pd.DataFrame, colunas_alvo: list, limite_z: fl
     return df_limpo
 
 
+def calcular_nh3_toxica(amonia_total: float, ph: float, temp_c: float) -> float:
+    """
+    Calcula a concentração de amônia não ionizada (NH₃ tóxica) a partir da amônia total,
+    pH e temperatura. Fórmula de Emerson et al. (1975), padrão em aquicultura.
+
+    pKa = 0.09018 + 2729.92 / (T + 273.15)
+    f   = 1 / (10^(pKa - pH) + 1)
+    NH₃ = amônia_total × f
+    """
+    if any(pd.isna(v) for v in [amonia_total, ph, temp_c]):
+        return float("nan")
+    pka = 0.09018 + (2729.92 / (temp_c + 273.15))
+    f   = 1.0 / (10 ** (pka - ph) + 1.0)
+    return amonia_total * f
+
+
 def calcular_alertas(df_trat: pd.DataFrame) -> list[dict]:
-    """Retorna lista de alertas críticos de qualidade da água"""
+    """Retorna lista de alertas críticos de qualidade da água.
+    Amônia total e NH₃ tóxica são avaliadas pelo último registro (não média).
+    Demais parâmetros usam a média do intervalo selecionado.
+    """
     alertas = []
+
+    # ── Parâmetros com média ──────────────────────────────────────────
     for param, limites in ALERTAS_AGUA.items():
         if param not in df_trat.columns:
             continue
@@ -183,9 +207,50 @@ def calcular_alertas(df_trat: pd.DataFrame) -> list[dict]:
         if pd.isna(media):
             continue
         if "max" in limites and media > limites["max"]:
-            alertas.append({"param": limites["label"], "valor": media, "tipo": "⚠️ ALTO", "limite": limites["max"]})
+            alertas.append({"param": limites["label"], "valor": media, "tipo": "⚠️ ALTO",  "limite": limites["max"], "nh3": False})
         if "min" in limites and media < limites["min"]:
-            alertas.append({"param": limites["label"], "valor": media, "tipo": "⚠️ BAIXO", "limite": limites["min"]})
+            alertas.append({"param": limites["label"], "valor": media, "tipo": "⚠️ BAIXO", "limite": limites["min"], "nh3": False})
+
+    # ── Amônia Total — último valor registrado ───────────────────────
+    df_sorted = df_trat.sort_values("dia_exp")
+    ult_amonia = df_sorted.dropna(subset=["amonia"])
+    ult_ph     = df_sorted.dropna(subset=["ph"])
+    ult_temp   = df_sorted.dropna(subset=["temp"])
+
+    if not ult_amonia.empty:
+        amonia_val = ult_amonia["amonia"].iloc[-1]
+        dia_ref    = int(ult_amonia["dia_exp"].iloc[-1])
+
+        # pH e temp: último valor registrado (ou médias do dia da amônia, se disponível)
+        ph_val   = ult_ph["ph"].iloc[-1]   if not ult_ph.empty   else float("nan")
+        temp_val = ult_temp["temp"].iloc[-1] if not ult_temp.empty else float("nan")
+
+        nh3 = calcular_nh3_toxica(amonia_val, ph_val, temp_val)
+
+        if pd.notna(nh3):
+            if nh3 >= NH3_LIMITE_CRITICO:
+                alertas.append({
+                    "param": f"NH₃ Tóxica (Dia {dia_ref})",
+                    "valor": nh3,
+                    "tipo": "🔴 CRÍTICO",
+                    "limite": NH3_LIMITE_CRITICO,
+                    "nh3": True,
+                    "amonia_total": amonia_val,
+                    "ph_ref": ph_val,
+                    "temp_ref": temp_val,
+                })
+            elif nh3 >= NH3_LIMITE_ALERTA:
+                alertas.append({
+                    "param": f"NH₃ Tóxica (Dia {dia_ref})",
+                    "valor": nh3,
+                    "tipo": "⚠️ ATENÇÃO",
+                    "limite": NH3_LIMITE_ALERTA,
+                    "nh3": True,
+                    "amonia_total": amonia_val,
+                    "ph_ref": ph_val,
+                    "temp_ref": temp_val,
+                })
+
     return alertas
 
 
@@ -307,7 +372,19 @@ if trat_sel:
             for trat, alertas in todos_alertas.items():
                 st.markdown(f"**{trat}**")
                 for a in alertas:
-                    st.warning(f"{a['tipo']} — {a['param']}: média **{a['valor']:.3f}** (limite: {a['limite']})")
+                    if a.get("nh3"):
+                        # Alerta especial com contexto da fórmula de Emerson
+                        linha1 = f"{a['tipo']} — **{a['param']}**: `{a['valor']:.4f} mg/L` (limite: {a['limite']} mg/L)"
+                        linha2 = f"Calculada com: NH₄⁺ Total = `{a['amonia_total']:.3f}` | pH = `{a['ph_ref']:.2f}` | Temp = `{a['temp_ref']:.1f} °C`"
+                        linha3 = "Ref: Emerson et al. (1975) — pKa = 0.09018 + 2729.92 / (T + 273.15)"
+                        msg = linha1 + "  \n" + linha2 + "  \n" + linha3
+                        if "CRÍTICO" in a["tipo"]:
+                            st.error(msg)
+                        else:
+                            st.warning(msg)
+                    else:
+                        rotulo = "último registro" if "Amônia" in a["param"] else "média"
+                        st.warning(f"{a['tipo']} — {a['param']}: **{a['valor']:.3f}** ({rotulo}, limite: {a['limite']})")
 
 # ==========================================
 # 7. CARDS KPI
@@ -358,7 +435,8 @@ for i, trat in enumerate(trat_sel):
         "Consumo_Dia_Anterior": cons_ontem,
         "Var_%": round(delta_cons, 2),
         "Mort": int(mort_total),
-        "Amonia_ultimo_registro": round(m_amonia, 3) if pd.notna(m_amonia) else "N/A",
+        "Amonia_total_ultimo": round(m_amonia, 3) if pd.notna(m_amonia) else "N/A",
+        "NH3_toxica_calculada": round(_nh3_card, 4) if pd.notna(_nh3_card) else "N/A",
         "OD": round(m_od, 2) if pd.notna(m_od) else "N/A",
         "Sobrevivencia_%": round(m_sobrev, 1) if pd.notna(m_sobrev) else "N/A",
     }
@@ -374,15 +452,24 @@ for i, trat in enumerate(trat_sel):
             c_b.metric("Temp (°C)", f"{m_temp:.1f}" if pd.notna(m_temp) else "—")
             c_a.metric("OD (mg/L)", f"{m_od:.2f}" if pd.notna(m_od) else "—")
             c_b.metric("Cond (µS)", f"{m_cond:.1f}" if pd.notna(m_cond) else "—")
+            # NH₃ tóxica calculada via Emerson (último registro de amônia + ph + temp)
+            _nh3_card = calcular_nh3_toxica(m_amonia, m_ph, m_temp)
+            _nh3_label = "🔴 NH₃" if (pd.notna(_nh3_card) and _nh3_card >= NH3_LIMITE_CRITICO) else                          "⚠️ NH₃" if (pd.notna(_nh3_card) and _nh3_card >= NH3_LIMITE_ALERTA) else "✅ NH₃"
+
             c_a.metric(
-                f"Amônia (D{dia_amonia})" if dia_amonia else "Amônia",
+                f"NH₄⁺ Total (D{dia_amonia})" if dia_amonia else "NH₄⁺ Total",
                 f"{m_amonia:.3f}" if pd.notna(m_amonia) else "—",
-                help="Último valor registrado (não média)"
+                help="Amônia total (NH₄⁺ + NH₃) — último valor registrado"
             )
             c_b.metric(
                 f"Nitrito (D{dia_nitrito})" if dia_nitrito else "Nitrito",
                 f"{m_nitrito:.3f}" if pd.notna(m_nitrito) else "—",
                 help="Último valor registrado (não média)"
+            )
+            c_a.metric(
+                _nh3_label + " Tóxica",
+                f"{_nh3_card:.4f} mg/L" if pd.notna(_nh3_card) else "—",
+                help=f"NH₃ não ionizada (Emerson 1975). Limite alerta: {NH3_LIMITE_ALERTA} | crítico: {NH3_LIMITE_CRITICO} mg/L"
             )
 
             st.divider()

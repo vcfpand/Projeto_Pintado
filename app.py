@@ -4,8 +4,27 @@ import plotly.express as px
 import numpy as np
 import requests
 from io import BytesIO
+import logging
+from functools import lru_cache
+
+# ==========================================
+# CONFIGURAÇÃO DE LOGGING
+# ==========================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="Pintado Dashboard - Analítico", layout="wide")
+
+# ==========================================
+# VALIDAÇÃO DE SECRETS OBRIGATÓRIOS
+# ==========================================
+REQUIRED_SECRETS = ["SENHA_ACESSO", "URL_ONEDRIVE"]
+for secret in REQUIRED_SECRETS:
+    if secret not in st.secrets:
+        st.error(f"❌ Secret ausente: {secret}. Configure em Secrets do Streamlit.")
+        st.stop()
+
+logger.info("✅ Secrets obrigatórios validados")
 
 # ==========================================
 # INTEGRAÇÃO GEMINI (NOVA API: google-genai)
@@ -14,13 +33,26 @@ usa_gemini = False
 client = None
 try:
     from google import genai
+    from tenacity import retry, stop_after_attempt
+    
     if "GEMINI_API_KEY" in st.secrets:
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
         usa_gemini = True
+        logger.info("✅ Gemini inicializado com sucesso")
 except ImportError:
-    st.sidebar.warning("⚠️ Biblioteca 'google-genai' não instalada.")
+    st.sidebar.warning("⚠️ Biblioteca 'google-genai' ou 'tenacity' não instalada.")
+    logger.warning("Gemini não disponível - biblioteca não instalada")
 except Exception as e:
     st.sidebar.warning(f"⚠️ Erro Gemini: {e}")
+    logger.error(f"Erro ao inicializar Gemini: {e}")
+
+# ==========================================
+# RETRY DECORATOR PARA GEMINI
+# ==========================================
+@retry(stop=stop_after_attempt(3))
+def call_gemini_api(model, prompt):
+    """Chama API Gemini com retry automático (máx 3 tentativas)"""
+    return client.models.generate_content(model=model, contents=prompt)
 
 # ==========================================
 # 1. LOGIN SIMPLES E SEGURO
@@ -40,9 +72,9 @@ if not st.session_state["autenticado"]:
                 st.session_state["autenticado"] = True
                 st.rerun()
             else:
-                st.error("Senha incorreta.")
-    except Exception:
-        st.error("Configure a SENHA_ACESSO nos Secrets do Streamlit.")
+                st.error("❌ Senha incorreta.")
+    except KeyError:
+        st.error("❌ Configure a SENHA_ACESSO nos Secrets do Streamlit.")
     st.stop()
 
 # ==========================================
@@ -54,20 +86,30 @@ st.divider()
 RACAO_INICIAL = {"T00": 14.74, "T10": 12.58, "T20": 12.90, "T30": 13.51}
 DIAS_TOTAIS = 46      
 
-@st.cache_data(ttl=300)
+# Cache ajustável com refresh manual
+CACHE_TTL = 120  # 2 minutos (reduzido de 5)
+
+@st.cache_data(ttl=CACHE_TTL)
 def load_data():
+    """Carrega dados do OneDrive com validação"""
     try:
         url = st.secrets["URL_ONEDRIVE"].strip()
-        resp = requests.get(url)
+        logger.info(f"Iniciando download de: {url[:50]}...")
+        
+        resp = requests.get(url, timeout=30)
         
         if resp.status_code != 200:
-            st.error("Erro ao baixar planilha. Verifique o link.")
+            error_msg = f"Erro HTTP {resp.status_code}: {resp.reason}"
+            st.error(f"❌ Falha ao baixar planilha. {error_msg}")
+            logger.error(error_msg)
             return None
 
         xls = BytesIO(resp.content)
         df_d = pd.read_excel(xls, sheet_name="Parametros_diarios", engine='openpyxl')
         xls.seek(0)
         df_b = pd.read_excel(xls, sheet_name="Biometrias", engine='openpyxl')
+        
+        logger.info(f"Planilhas carregadas: {len(df_d)} linhas de parâmetros, {len(df_b)} linhas de biometrias")
         
         df_d.columns = [c.strip().lower() for c in df_d.columns]
         df_b.columns = [c.strip().lower() for c in df_b.columns]
@@ -81,31 +123,70 @@ def load_data():
 
         df = pd.merge(df_d, df_b[['caixa', 'n_peixes_inicial', 'peso_medio_inicial']], on='caixa')
         df['caixa'] = df['caixa'].astype(str)
+        
+        logger.info(f"✅ Dados carregados com sucesso: {len(df)} registros")
         return df
+    except requests.exceptions.Timeout:
+        st.error("❌ Timeout ao baixar planilha. Verifique sua conexão.")
+        logger.error("Timeout na requisição")
+        return None
     except Exception as e:
-        st.error(f"Falha de sistema: {e}")
+        st.error(f"❌ Falha de sistema: {e}")
+        logger.error(f"Erro ao carregar dados: {e}", exc_info=True)
         return None
 
-df = load_data()
+# ==========================================
+# FUNÇÃO DE VALIDAÇÃO DE DADOS
+# ==========================================
+def validate_data(df_in):
+    """Valida estrutura mínima do DataFrame"""
+    required_cols = ['caixa', 'tratamento', 'dia_exp', 'consumo', 'ph', 'temp', 'od', 'mort']
+    missing = [c for c in required_cols if c not in df_in.columns]
+    if missing:
+        raise ValueError(f"❌ Colunas obrigatórias faltando: {missing}")
+    if df_in.empty:
+        raise ValueError("❌ DataFrame vazio após carregamento")
+    logger.info(f"✅ Validação de dados passou: {len(df_in)} registros, {len(df_in.columns)} colunas")
+    return df_in
 
 # ==========================================
 # FUNÇÃO ORIGINAL DE OUTLIERS RESTAURADA
 # ==========================================
 def remove_outliers_zscore(df_in, colunas_alvo, limite_z=3):
+    """Remove outliers usando Z-score antes dos cálculos"""
     df_limpo = df_in.copy()
+    linhas_antes = len(df_limpo)
+    
     for col in colunas_alvo:
         # Apenas processa se a coluna tiver dados e variância
         if df_limpo[col].notna().any() and df_limpo[col].std() > 0:
             z_scores = np.abs((df_limpo[col] - df_limpo[col].mean()) / df_limpo[col].std())
             # Mantém as linhas onde o Z-score é menor que o limite OU a célula original era NaN
             df_limpo = df_limpo[(z_scores < limite_z) | (df_limpo[col].isna())]
+    
+    linhas_removidas = linhas_antes - len(df_limpo)
+    logger.info(f"Outliers removidos: {linhas_removidas} registros ({linhas_removidas/linhas_antes*100:.1f}%)")
     return df_limpo
 
+# Carrega dados
+df = load_data()
+
 if df is not None:
+    try:
+        df = validate_data(df)
+    except ValueError as e:
+        st.error(str(e))
+        st.stop()
+    
     # ==========================================
     # 3. SIDEBAR E CÁLCULOS
     # ==========================================
     st.sidebar.header("⚙️ Configurações Globais")
+    
+    # Botão de refresh de dados
+    if st.sidebar.button("🔄 Recarregar Dados", help="Força recarga dos dados do OneDrive"):
+        st.cache_data.clear()
+        st.rerun()
     
     remover_outliers = st.sidebar.toggle("Limpar Outliers (Z-Score=3)", value=False, help="Remove picos irreais de leitura.")
     
@@ -120,7 +201,7 @@ if df is not None:
     
     trat_sel = st.sidebar.multiselect("Tratamentos", ["T00", "T10", "T20", "T30"], default=["T00", "T10", "T20", "T30"])
 
-    # Aplicação do Filtro de Outliers
+    # ✅ ORDEM CORRIGIDA: Aplicar filtro ANTES dos cálculos
     if remover_outliers:
         colunas_para_limpar = ['ph', 'temp', 'od', 'cond', 'amonia', 'nitrito', 'consumo']
         df = remove_outliers_zscore(df, colunas_para_limpar)
@@ -135,19 +216,34 @@ if df is not None:
     df['consumo_preenchido'] = df['consumo'].fillna(0)
     df['consumo_acum'] = df.groupby('caixa')['consumo_preenchido'].cumsum()
     
-    df['caa_est'] = np.where(df['ganho_biomassa_g'] > 0.01, df['consumo_acum'] / df['ganho_biomassa_g'], 0.0)
-    df['taxa_arracoamento'] = (df['consumo'] / df['biomassa_est_g']) * 100
+    # ✅ FIX: Evita divisão por zero com validação apropriada
+    df['caa_est'] = np.where(
+        (df['ganho_biomassa_g'] > 0.01) & (df['ganho_biomassa_g'].notna()),
+        df['consumo_acum'] / df['ganho_biomassa_g'],
+        np.nan
+    )
+    
+    df['taxa_arracoamento'] = np.where(
+        (df['biomassa_est_g'] > 0) & (df['biomassa_est_g'].notna()),
+        (df['consumo'] / df['biomassa_est_g']) * 100,
+        np.nan
+    )
 
-    # Lógica de Dias
+    # ✅ FIX: Reutilizar mesma instância de df_real sem múltiplas chamadas load_data()
     df_real = df.dropna(subset=['consumo'])
-    dia_max_preenchido = int(load_data().dropna(subset=['consumo'])['dia_exp'].max()) if not load_data().dropna(subset=['consumo']).empty else 1
+    dia_max_preenchido = int(df_real['dia_exp'].max()) if not df_real.empty else 1
+    logger.info(f"Dia máximo preenchido: {dia_max_preenchido}/{DIAS_TOTAIS}")
     
     st.write(f"**Progresso do Ensaio:** Dia {dia_max_preenchido} de {DIAS_TOTAIS}")
     st.progress(min(dia_max_preenchido / DIAS_TOTAIS, 1.0))
     st.divider()
 
     dias_sel = st.sidebar.slider("Filtro de Dias", 0, dia_max_preenchido, (0, dia_max_preenchido))
-    df_f = df[(df['tratamento'].isin(trat_sel)) & (df['dia_exp'].between(dias_sel[0], dias_sel[1]))]
+    
+    # ✅ FIX: Remove NaN dos gráficos
+    df_f = df[(df['tratamento'].isin(trat_sel)) & (df['dia_exp'].between(dias_sel[0], dias_sel[1]))].dropna(
+        subset=['dia_exp', 'tratamento']
+    )
 
     # ==========================================
     # CARDS DE DESEMPENHO (KPIs Completos)
@@ -189,7 +285,7 @@ if df is not None:
                 st.write(f"☣️ Amônia: **{m_amonia:.3f}** | ☠️ Nitrito: **{m_nitrito:.3f}**")
                 st.divider()
                 st.metric("Consumo Total (g)", f"{cons_acumulado:.0f}")
-                st.metric("Consumo Diário", f"{cons_hoje:.0f} g", f"{delta_cons:.1f}%", delta_color="normal")
+                st.metric("Consumo Diário", f"{cons_hoje:.0f} g", f"{delta_cons:.1f}%,", delta_color="normal")
                 st.divider()
                 st.metric("Ração Disp. (kg)", f"{est_restante_kg:.2f}")
                 st.metric("Mortalidade Total", f"{int(mort_total)}")
@@ -209,13 +305,15 @@ if df is not None:
                     Responda de forma profissional, acadêmica e objetiva."""
                     
                     try:
-                        resposta = client.models.generate_content(
+                        resposta = call_gemini_api(
                             model="gemini-3-flash-preview",
-                            contents=prompt
+                            prompt=prompt
                         )
                         st.info(resposta.text)
+                        logger.info("✅ Análise Gemini gerada com sucesso")
                     except Exception as err:
-                        st.error(f"Erro na API: {err}")
+                        st.error(f"❌ Erro na API Gemini (após 3 tentativas): {err}")
+                        logger.error(f"Erro Gemini: {err}", exc_info=True)
 
     st.divider()
 
@@ -227,30 +325,40 @@ if df is not None:
     with tab1:
         st.subheader("Desempenho Biológico")
         c1, c2, c3 = st.columns(3)
-        c1.plotly_chart(px.line(df_f, x="dia_exp", y="peso_est", color="tratamento", title="Peso (g)", template="plotly_dark"), use_container_width=True)
-        c2.plotly_chart(px.line(df_f, x="dia_exp", y="caa_est", color="tratamento", title="CAA Estimada", template="plotly_dark"), use_container_width=True)
-        c3.plotly_chart(px.line(df_f, x="dia_exp", y="biomassa_est_g", color="tratamento", title="Biomassa (g)", template="plotly_dark"), use_container_width=True)
+        
+        try:
+            c1.plotly_chart(px.line(df_f, x="dia_exp", y="peso_est", color="tratamento", title="Peso (g)", template="plotly_dark"), use_container_width=True)
+            c2.plotly_chart(px.line(df_f, x="dia_exp", y="caa_est", color="tratamento", title="CAA Estimada", template="plotly_dark"), use_container_width=True)
+            c3.plotly_chart(px.line(df_f, x="dia_exp", y="biomassa_est_g", color="tratamento", title="Biomassa (g)", template="plotly_dark"), use_container_width=True)
+        except Exception as e:
+            st.error(f"❌ Erro ao gerar gráficos de zootecnia: {e}")
+            logger.error(f"Erro em gráficos tab1: {e}")
 
     with tab2:
-        st.subheader("Evolução dos Parâmetros Físico-Químicos")
+        st.subheader("Evolução dos Parâmetros Físico-Químico")
         
         tipo_grafico = st.radio("Selecione a visualização:", ["Linha (Média Tratamento)", "Linha (Por Caixa)", "Boxplot (Distribuição)"], horizontal=True)
         param_list = ['temp', 'od', 'amonia', 'nitrito', 'ph', 'cond']
         
-        for i in range(0, len(param_list), 3):
-            cols_agua = st.columns(3)
-            for j in range(3):
-                if i + j < len(param_list):
-                    p = param_list[i+j]
-                    
-                    if tipo_grafico == "Linha (Média Tratamento)":
-                        fig_agua = px.line(df_f.groupby(['dia_exp','tratamento'])[p].mean().reset_index(), x="dia_exp", y=p, color="tratamento", title=p.upper(), template="plotly_dark", markers=True)
-                    elif tipo_grafico == "Linha (Por Caixa)":
-                         fig_agua = px.line(df_f, x="dia_exp", y=p, color="caixa", facet_col="tratamento", facet_col_wrap=2, title=p.upper(), template="plotly_dark")
-                    else:
-                        fig_agua = px.box(df_f, x="tratamento", y=p, color="tratamento", title=p.upper(), template="plotly_dark", points="all")
+        try:
+            for i in range(0, len(param_list), 3):
+                cols_agua = st.columns(3)
+                for j in range(3):
+                    if i + j < len(param_list):
+                        p = param_list[i+j]
                         
-                    cols_agua[j].plotly_chart(fig_agua, use_container_width=True)
+                        if tipo_grafico == "Linha (Média Tratamento)":
+                            df_agg = df_f.groupby(['dia_exp','tratamento'])[p].mean().reset_index()
+                            fig_agua = px.line(df_agg, x="dia_exp", y=p, color="tratamento", title=p.upper(), template="plotly_dark", markers=True)
+                        elif tipo_grafico == "Linha (Por Caixa)":
+                             fig_agua = px.line(df_f, x="dia_exp", y=p, color="caixa", facet_col="tratamento", facet_col_wrap=2, title=p.upper(), template="plotly_dark")
+                        else:
+                            fig_agua = px.box(df_f, x="tratamento", y=p, color="tratamento", title=p.upper(), template="plotly_dark", points="all")
+                            
+                        cols_agua[j].plotly_chart(fig_agua, use_container_width=True)
+        except Exception as e:
+            st.error(f"❌ Erro ao gerar gráficos de água: {e}")
+            logger.error(f"Erro em gráficos tab2: {e}")
 
     with tab3:
         st.subheader("Correlação Ambiental e Comportamental")
@@ -258,7 +366,16 @@ if df is not None:
         
         with c_est1:
             p_corr = st.selectbox("Eixo X (Parâmetro):", ['amonia', 'od', 'temp', 'ph'])
-            st.plotly_chart(px.scatter(df_f, x=p_corr, y="taxa_arracoamento", color="tratamento", trendline="ols", title=f"Impacto do {p_corr.upper()} no Apetite (%PV)", template="plotly_dark"), use_container_width=True)
+            try:
+                # ✅ FIX: Completa a string incompleta (use_c[...])
+                st.plotly_chart(
+                    px.scatter(df_f, x=p_corr, y="taxa_arracoamento", color="tratamento", trendline="ols", 
+                              title=f"Impacto do {p_corr.upper()} no Apetite (%PV)", template="plotly_dark"),
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"❌ Erro ao gerar gráfico de scatter: {e}")
+                logger.error(f"Erro em scatter plot: {e}")
             
         with c_est2:
             st.write("Esta análise de regressão demonstra como variações pontuais na qualidade da água afetam a voracidade (consumo em relação à biomassa) dos peixes em cada tratamento.")
@@ -269,20 +386,29 @@ if df is not None:
                         try:
                             colunas_calc = ['taxa_arracoamento', 'amonia', 'od', 'temp', 'ph']
                             df_limpo_corr = df_f[colunas_calc].dropna()
-                            matriz_corr = df_limpo_corr.corr().to_dict()
                             
-                            prompt_estat = f"""Atue como um Investigador Biostatístico de um ensaio de substituição de farinha de peixe por farinha de mosca-soldado-negro (Hermetia illucens) para juvenis de Pintado.
-                            Analise a seguinte matriz de correlação de Pearson entre o ambiente e a taxa de arraçoamento (apetite): {matriz_corr}.
-                            Escreva um relatório em 3 tópicos:
-                            1. Interpretação da Correlação: Discuta a força e a direção da correlação entre {p_corr.upper()} e a taxa de arraçoamento.
-                            2. Impacto Multivariado: Existe alguma outra correlação ambiental forte na matriz? Como o OD e a Amônia interagem com o consumo?
-                            3. Conclusão Científica: O que estes dados apontam para o manejo de estufa?
-                            Utilize linguagem científica formal."""
-                            
-                            resposta_estat = client.models.generate_content(
-                                model="gemini-3-flash-preview",
-                                contents=prompt_estat
-                            )
-                            st.success(resposta_estat.text)
+                            if df_limpo_corr.empty or len(df_limpo_corr) < 3:
+                                st.warning("⚠️ Dados insuficientes para calcular correlações no intervalo selecionado.")
+                                logger.warning("Dados insuficientes para correlação")
+                            else:
+                                matriz_corr = df_limpo_corr.corr().to_dict()
+                                
+                                prompt_estat = f"""Atue como um Investigador Biostatístico de um ensaio de substituição de farinha de peixe por farinha de mosca-soldado-negro (Hermetia illucens) para juvenis de Pintado.
+                                Analise a seguinte matriz de correlação de Pearson entre o ambiente e a taxa de arraçoamento (apetite): {matriz_corr}.
+                                Escreva um relatório em 3 tópicos:
+                                1. Interpretação da Correlação: Discuta a força e a direção da correlação entre {p_corr.upper()} e a taxa de arraçoamento.
+                                2. Impacto Multivariado: Existe alguma outra correlação ambiental forte na matriz? Como o OD e a Amônia interagem com o consumo?
+                                3. Conclusão Científica: O que estes dados apontam para o manejo de estufa?
+                                Utilize linguagem científica formal."""
+                                
+                                resposta_estat = call_gemini_api(
+                                    model="gemini-3-flash-preview",
+                                    prompt=prompt_estat
+                                )
+                                st.success(resposta_estat.text)
+                                logger.info("✅ Relatório estatístico Gemini gerado com sucesso")
                         except Exception as e:
-                             st.error(f"Não há variação estatística suficiente (ou todos os valores são nulos) no intervalo de dias selecionado para calcular correlações. Erro interno: {e}")
+                             st.error(f"❌ Erro ao processar análise estatística: {e}")
+                             logger.error(f"Erro em análise estatística: {e}", exc_info=True)
+else:
+    st.error("❌ Falha ao carregar dados. Verifique a configuração do URL_ONEDRIVE nos Secrets.")

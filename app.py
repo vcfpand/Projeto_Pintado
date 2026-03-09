@@ -91,7 +91,7 @@ df = load_data()
 # ==========================================
 # FUNÇÃO ORIGINAL DE OUTLIERS RESTAURADA
 # ==========================================
-def remove_outliers_zscore(df_in, colunas_alvo, limite_z=3):
+def remove_outliers_zscore(df_in, colunas_alvo, limite_z=2):
     df_limpo = df_in.copy()
     for col in colunas_alvo:
         # Apenas processa se a coluna tiver dados e variância
@@ -286,3 +286,4 @@ if df is not None:
                             st.success(resposta_estat.text)
                         except Exception as e:
                              st.error(f"Não há variação estatística suficiente (ou todos os valores são nulos) no intervalo de dias selecionado para calcular correlações. Erro interno: {e}")
+

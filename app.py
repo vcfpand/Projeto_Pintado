@@ -40,6 +40,11 @@ logger.info("✅ Secrets obrigatórios validados")
 usa_gemini = False
 client = None
 
+GEMINI_MODEL = "gemini-3-flash-preview"
+
+def call_gemini_api(model, prompt):
+    raise RuntimeError("Gemini não disponível")
+
 try:
     from google import genai
     from tenacity import retry, stop_after_attempt, wait_exponential
@@ -49,24 +54,22 @@ try:
         usa_gemini = True
         logger.info("✅ Gemini inicializado com sucesso")
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def call_gemini_api(model, prompt):
-        """Chama API Gemini com retry automático e backoff exponencial"""
-        return client.models.generate_content(model=model, contents=prompt)
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            reraise=True,  # propaga o erro real em vez de embrulhá-lo em RetryError
+        )
+        def call_gemini_api(model, prompt):
+            """Chama API Gemini com retry e backoff exponencial."""
+            return client.models.generate_content(model=model, contents=prompt)
 
 except ImportError:
     st.sidebar.warning("⚠️ Biblioteca 'google-genai' ou 'tenacity' não instalada.")
     logger.warning("Gemini não disponível - biblioteca não instalada")
 
-    def call_gemini_api(model, prompt):
-        raise RuntimeError("Gemini não disponível")
-
 except Exception as e:
-    st.sidebar.warning(f"⚠️ Erro Gemini: {e}")
+    st.sidebar.warning(f"⚠️ Erro ao inicializar Gemini: {e}")
     logger.error(f"Erro ao inicializar Gemini: {e}")
-
-    def call_gemini_api(model, prompt):
-        raise RuntimeError("Gemini não disponível")
 
 # ==========================================
 # 1. LOGIN
@@ -399,10 +402,13 @@ if usa_gemini and client is not None:
                 2. Avalie sanidade e ambiente: há correlação entre amônia/OD e mortalidade?
                 Responda de forma profissional e objetiva."""
                 try:
-                    resposta = call_gemini_api(model="gemini-2.0-flash", prompt=prompt)
+                    resposta = call_gemini_api(model=GEMINI_MODEL, prompt=prompt)
                     st.info(resposta.text)
                 except Exception as err:
-                    st.error(f"❌ Erro na API Gemini: {err}")
+                    causa = getattr(err, "message", None) or str(err)
+                    st.error(f"❌ Erro na API Gemini: {causa}")
+                    st.caption("💡 Verifique se a `GEMINI_API_KEY` está correta em Settings → Secrets.")
+                    logger.error(f"Erro Gemini: {err}", exc_info=True)
 
 st.divider()
 
@@ -634,10 +640,13 @@ with tab4:
                         2. Impacto multivariado: OD e Amônia interagem com o consumo?
                         3. Conclusão para manejo de estufa.
                         Use linguagem científica formal."""
-                        resposta_estat = call_gemini_api(model="gemini-2.0-flash", prompt=prompt_estat)
+                        resposta_estat = call_gemini_api(model=GEMINI_MODEL, prompt=prompt_estat)
                         st.success(resposta_estat.text)
                 except Exception as e:
-                    st.error(f"❌ Erro na análise estatística: {e}")
+                    causa = getattr(e, "message", None) or str(e)
+                    st.error(f"❌ Erro na análise estatística: {causa}")
+                    st.caption("💡 Verifique se a `GEMINI_API_KEY` está correta em Settings → Secrets.")
+                    logger.error(f"Erro Gemini estatística: {e}", exc_info=True)
 
 # ------- TAB 5: DADOS E EXPORTAÇÃO -------
 with tab5:

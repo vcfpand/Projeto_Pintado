@@ -88,15 +88,28 @@ def load_data():
 
 df = load_data()
 
-# Função para remover outliers baseada no Z-score
-def remove_outliers_zscore(df_in, colunas_alvo, limite_z=3):
+# ==========================================
+# FUNÇÃO DE REMOÇÃO DE OUTLIERS CORRIGIDA (Z-Score Agrupado)
+# ==========================================
+def remove_outliers_zscore_grouped(df_in, colunas_alvo, limite_z=2.5):
+    """Remove outliers calculando o Z-Score para cada coluna agrupado por 'dia_exp' e 'tratamento'."""
     df_limpo = df_in.copy()
+    
     for col in colunas_alvo:
-        # Apenas processa se a coluna tiver dados e variaância
-        if df_limpo[col].notna().any() and df_limpo[col].std() > 0:
-            z_scores = np.abs((df_limpo[col] - df_limpo[col].mean()) / df_limpo[col].std())
-            # Mantém as linhas onde o Z-score é menor que o limite OU a célula original era NaN
-            df_limpo = df_limpo[(z_scores < limite_z) | (df_limpo[col].isna())]
+        if col in df_limpo.columns:
+            # Calcula a média e o desvio padrão de cada parâmetro no dia e tratamento específicos
+            media_grupo = df_limpo.groupby(['dia_exp', 'tratamento'])[col].transform('mean')
+            std_grupo = df_limpo.groupby(['dia_exp', 'tratamento'])[col].transform('std')
+            
+            # Para evitar erro de divisão por zero onde o std é 0, substituímos por um valor muito pequeno
+            std_grupo = std_grupo.replace(0, 1e-9)
+            
+            # Calcula o Z-score de cada leitura em relação ao seu grupo
+            z_scores = np.abs((df_limpo[col] - media_grupo) / std_grupo)
+            
+            # Aplica o filtro: mantém se Z for menor que o limite, ou se for NaN, ou se for o primeiro dia (sem variação histórica suficiente)
+            df_limpo[col] = np.where((z_scores > limite_z) & (df_limpo[col].notna()), np.nan, df_limpo[col])
+            
     return df_limpo
 
 if df is not None:
@@ -106,7 +119,7 @@ if df is not None:
     st.sidebar.header("⚙️ Configurações Globais")
     
     # NOVO FILTRO DE OUTLIERS
-    remover_outliers = st.sidebar.toggle("Limpar Outliers (Filtro Estatístico)", value=False, help="Remove picos irreais de leitura usando método Z-Score")
+    remover_outliers = st.sidebar.toggle("Limpar Outliers", value=False, help="Remove leituras anómalas (Z > 2.5) avaliando o desvio padrão do tratamento no próprio dia.")
     
     st.sidebar.divider()
     st.sidebar.header("🎯 Projeção de Abate")
@@ -119,25 +132,27 @@ if df is not None:
     
     trat_sel = st.sidebar.multiselect("Tratamentos", ["T00", "T10", "T20", "T30"], default=["T00", "T10", "T20", "T30"])
 
-    # Aplica remoção de outliers caso o botão esteja ativo
+    # Aplica remoção de outliers caso o botão esteja ativo (apenas nas variáveis ambientais e consumo)
     if remover_outliers:
         colunas_para_limpar = ['ph', 'temp', 'od', 'cond', 'amonia', 'nitrito', 'consumo']
-        df = remove_outliers_zscore(df, colunas_para_limpar)
+        df = remove_outliers_zscore_grouped(df, colunas_para_limpar)
 
-    # Matemática da Biomassa
+    # Matemática da Biomassa e Índices Zootécnicos
+    # NOTA: O peso estimado e a mortalidade não são filtrados para não quebrar a lógica populacional
     df['peso_est'] = df['peso_medio_inicial'] * np.exp(tce * df['dia_exp'])
     df['mort_acum'] = df.groupby('caixa')['mort'].cumsum().fillna(0)
     df['n_peixes_atual'] = df['n_peixes_inicial'] - df['mort_acum']
     df['biomassa_est_g'] = df['peso_est'] * df['n_peixes_atual']
     df['ganho_biomassa_g'] = df['biomassa_est_g'] - (df['peso_medio_inicial'] * df['n_peixes_inicial'])
     
-    df['consumo_acum'] = df.groupby('caixa')['consumo'].cumsum()
+    # Consumo e CAA (substituímos os NaN do consumo por zero na soma cumulativa para não perder histórico)
+    df['consumo_acum'] = df.groupby('caixa')['consumo'].fillna(0).cumsum()
     df['caa_est'] = np.where(df['ganho_biomassa_g'] > 0.01, df['consumo_acum'] / df['ganho_biomassa_g'], 0.0)
     df['taxa_arracoamento'] = (df['consumo'] / df['biomassa_est_g']) * 100
 
-    # Lógica de Dias
-    df_real = df.dropna(subset=['consumo'])
-    dia_max_preenchido = int(df_real['dia_exp'].max()) if not df_real.empty else 1
+    # Lógica de Dias e Progresso
+    # Usamos o dia_exp original da base não filtrada para não perder a referência do último dia
+    dia_max_preenchido = int(load_data().dropna(subset=['consumo'])['dia_exp'].max()) if not load_data().dropna(subset=['consumo']).empty else 1
     
     st.write(f"**Progresso do Ensaio:** Dia {dia_max_preenchido} de {DIAS_TOTAIS}")
     st.progress(min(dia_max_preenchido / DIAS_TOTAIS, 1.0))
@@ -167,7 +182,7 @@ if df is not None:
             m_amonia = d_trat['amonia'].mean()
             m_nitrito = d_trat['nitrito'].mean()
             
-            cons_acumulado = d_trat['consumo'].sum()
+            cons_acumulado = d_trat['consumo_acum'].max() if not d_trat.empty else 0
             cons_hoje = d_hoje['consumo'].sum() if not d_hoje.empty else 0
             cons_ontem = d_ontem['consumo'].sum() if not d_ontem.empty else 0
             
@@ -232,9 +247,7 @@ if df is not None:
     with tab2:
         st.subheader("Evolução dos Parâmetros Físico-Químicos")
         
-        # Opções de visualização para a aba de Água
-        tipo_grafico = st.radio("Selecione o tipo de visualização:", ["Linha (Média Tratamento)", "Linha (Por Caixa)", "Boxplot (Distribuição)"], horizontal=True)
-        
+        tipo_grafico = st.radio("Selecione a visualização:", ["Linha (Média Tratamento)", "Linha (Por Caixa)", "Boxplot (Distribuição)"], horizontal=True)
         param_list = ['temp', 'od', 'amonia', 'nitrito', 'ph', 'cond']
         
         for i in range(0, len(param_list), 3):
@@ -263,25 +276,21 @@ if df is not None:
         with c_est2:
             st.write("Esta análise de regressão demonstra como variações pontuais na qualidade da água afetam a voracidade (consumo em relação à biomassa) dos peixes em cada tratamento.")
             
-            # Análise Detalhada Gemini Estatística
             if usa_gemini and client is not None:
                  if st.button("🧠 Gerar Relatório Estatístico Detalhado (IA)", key="btn_estat_ai"):
-                    with st.spinner("O Gemini está a processar os coeficientes..."):
-                        
-                        # Calcula matriz de correlação para enviar à IA
+                    with st.spinner("O Gemini está processando as matrizes de covariância..."):
                         try:
                             colunas_calc = ['taxa_arracoamento', 'amonia', 'od', 'temp', 'ph']
-                            # Pega apenas as colunas que tem variação para evitar erro na correlação
                             df_limpo_corr = df_f[colunas_calc].dropna()
                             matriz_corr = df_limpo_corr.corr().to_dict()
                             
-                            prompt_estat = f"""Atue como um Investigador Estatístico de um ensaio de substituição de farinha de peixe por farinha de mosca-soldado-negro para Pintado.
+                            prompt_estat = f"""Atue como um Investigador Biostatístico de um ensaio de substituição de farinha de peixe por farinha de mosca-soldado-negro (Hermetia illucens) para juvenis de Pintado.
                             Analise a seguinte matriz de correlação de Pearson entre o ambiente e a taxa de arraçoamento (apetite): {matriz_corr}.
-                            Escreva um relatório detalhado em 3 tópicos:
-                            1. Interpretação da Correlação do {p_corr.upper()}: Discuta a força e a direção da correlação especificamente entre {p_corr} e a taxa de arraçoamento.
-                            2. Impacto Multivariado: Existe alguma outra correlação ambiental notável na matriz que mereça atenção?
-                            3. Conclusão Prática: O que isso significa para o manejo diário na estufa?
-                            Utilize jargão científico estatístico adequado."""
+                            Escreva um relatório em 3 tópicos:
+                            1. Interpretação da Correlação: Discuta a força e a direção da correlação entre {p_corr.upper()} e a taxa de arraçoamento.
+                            2. Impacto Multivariado: Existe alguma outra correlação ambiental forte na matriz? Como o OD e a Amônia interagem com o consumo?
+                            3. Conclusão Científica: O que estes dados apontam para o manejo de estufa?
+                            Utilize linguagem científica formal."""
                             
                             resposta_estat = client.models.generate_content(
                                 model="gemini-3-flash-preview",
@@ -289,4 +298,4 @@ if df is not None:
                             )
                             st.success(resposta_estat.text)
                         except Exception as e:
-                             st.error(f"Erro ao gerar estatística: não há variação suficiente nos dados selecionados. Erro: {e}")
+                             st.error(f"Não há variação estatística suficiente (ou todos os valores são nulos) no intervalo de dias selecionado para calcular correlações. Erro interno: {e}")

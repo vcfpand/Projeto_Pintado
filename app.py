@@ -8,17 +8,18 @@ from io import BytesIO
 st.set_page_config(page_title="Pintado Dashboard - Analítico", layout="wide")
 
 # ==========================================
-# INTEGRAÇÃO GEMINI (IA) - TENTATIVA DE IMPORTAÇÃO SEGURA
+# INTEGRAÇÃO GEMINI (NOVA API: google-genai)
 # ==========================================
 usa_gemini = False
+client = None
 try:
     from google import genai
     if "GEMINI_API_KEY" in st.secrets:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Inicia o cliente com a chave do cofre do Streamlit
+        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
         usa_gemini = True
 except ImportError:
-    st.sidebar.warning("⚠️ Biblioteca 'google-generativeai' não instalada. O relatório de IA está desativado.")
+    st.sidebar.warning("⚠️ Biblioteca 'google-genai' não instalada. O relatório de IA está desativado.")
 except Exception as e:
     st.sidebar.warning(f"⚠️ Erro ao configurar Gemini: {e}")
 
@@ -177,24 +178,28 @@ if df is not None:
                     st.metric("Mortalidade (Período)", f"{int(mort_total)}")
 
     # ==========================================
-    # ANÁLISE GERAL (GEMINI) - AGORA LOGO ABAIXO DOS CARDS
+    # ANÁLISE GERAL (GEMINI) - SINTAXE NOVA
     # ==========================================
-    if usa_gemini:
+    if usa_gemini and client is not None:
         with st.container(border=True):
             st.markdown("#### 🤖 Análise Zootécnica Geral (IA)")
             if st.button("Gerar Relatório de Desempenho", type="primary"):
-                with st.spinner("Analisando as médias do período..."):
+                with st.spinner("Analisando as médias do período através do Gemini..."):
                     prompt = f"""Atue como um Zootecnista responsável por um ensaio de nutrição com juvenis de Pintado. 
                     Analise os dados sumarizados do último dia selecionado: {dados_gemini}.
                     Escreva 2 parágrafos. O primeiro sobre a aceitação da dieta (avaliando as variações percentuais de consumo de ontem para hoje). O segundo sobre riscos ambientais, correlacionando mortalidade com possíveis níveis de amônia apresentados. Seja técnico e objetivo."""
                     
                     try:
-                        resposta = model.generate_content(prompt)
+                        # Utilizando o novo formato do SDK google-genai
+                        resposta = client.models.generate_content(
+                            model="gemini-3-flash-preview",
+                            contents=prompt
+                        )
                         st.info(resposta.text)
                     except Exception as err:
                         st.error(f"Erro ao contatar API do Gemini: {err}")
     else:
-        st.info("💡 A Inteligência Artificial está desativada. Para ativar, certifique-se de que a biblioteca 'google-generativeai' está instalada e a chave configurada nos Secrets.")
+        st.info("💡 A Inteligência Artificial está desativada. Instale 'google-genai' e configure a chave nos Secrets.")
 
     st.divider()
 
@@ -206,53 +211,4 @@ if df is not None:
     with tab1:
         c1, c2 = st.columns(2)
         c1.plotly_chart(px.line(df_f, x="dia_exp", y="peso_est", color="tratamento", title="Curva de Crescimento (g)", template="plotly_dark"), use_container_width=True)
-        c2.plotly_chart(px.line(df_f, x="dia_exp", y="caa_est", color="tratamento", title="Conversão Alimentar (CAA)", template="plotly_dark"), use_container_width=True)
-
-    with tab2:
-        st.subheader("Parâmetros Fisico-Químicos")
-        param_agua_list = ['temp', 'od', 'amonia', 'nitrito', 'ph', 'cond']
-        
-        # 2 gráficos por linha
-        for i in range(0, len(param_agua_list), 2):
-            colA, colB = st.columns(2)
-            p1 = param_agua_list[i]
-            colA.plotly_chart(px.line(df_f.groupby(['dia_exp','tratamento'])[p1].mean().reset_index(), x="dia_exp", y=p1, color="tratamento", title=f"Evolução: {p1.upper()}", template="plotly_dark", markers=True), use_container_width=True)
-            
-            if i + 1 < len(param_agua_list):
-                p2 = param_agua_list[i+1]
-                colB.plotly_chart(px.line(df_f.groupby(['dia_exp','tratamento'])[p2].mean().reset_index(), x="dia_exp", y=p2, color="tratamento", title=f"Evolução: {p2.upper()}", template="plotly_dark", markers=True), use_container_width=True)
-
-    with tab3:
-        col_est1, col_est2 = st.columns(2)
-        with col_est1:
-            st.subheader("Simulador de Demanda")
-            dias_rest = DIAS_TOTAIS - dia_max_preenchido
-            res_estoque = []
-            for t in ["T00", "T10", "T20", "T30"]:
-                df_t = df[df['tratamento'] == t]
-                cons_real = df_t['consumo'].sum()
-                est_kg = RACAO_INICIAL[t] - (cons_real / 1000)
-                
-                df_hoje = df_t[df_t['dia_exp'] == dia_max_preenchido]
-                if not df_hoje.empty and df_hoje['taxa_arracoamento'].mean() > 0:
-                    t_sim, p_sim = df_hoje['taxa_arracoamento'].mean() / 100, df_hoje['peso_est'].mean()
-                    vivos = df_hoje['n_peixes_atual'].sum()
-                else:
-                    t_sim, p_sim, vivos = 0.03, df_t['peso_medio_inicial'].mean(), df_t['n_peixes_inicial'].sum()
-                
-                demanda_f = 0
-                for _ in range(dias_rest):
-                    p_sim *= np.exp(tce)
-                    demanda_f += (p_sim * vivos * t_sim)
-                
-                res_estoque.append({"Tratamento": t, "Estoque (kg)": est_kg, "Falta (kg)": demanda_f/1000})
-            
-            df_p = pd.DataFrame(res_estoque)
-            st.plotly_chart(px.bar(df_p, x="Tratamento", y=["Estoque (kg)", "Falta (kg)"], barmode="group", template="plotly_dark"), use_container_width=True)
-
-        with col_est2:
-            st.subheader("Dispersão: Ambiente vs Consumo")
-            p_corr = st.selectbox("Eixo X:", ['amonia', 'od', 'temp', 'ph'])
-            st.plotly_chart(px.scatter(df_f, x=p_corr, y="taxa_arracoamento", color="tratamento", trendline="ols", template="plotly_dark"), use_container_width=True)
-
-
+        c2.plotly_chart(px.line(df_f, x="dia_exp", y="caa_est", color="tratamento", title="Conversão Alimentar (CAA)", template="plotly_

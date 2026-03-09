@@ -121,7 +121,9 @@ def load_data():
                     df_d[col] = df_d[col].astype(str).str.replace(',', '.')
                 df_d[col] = pd.to_numeric(df_d[col], errors='coerce')
 
-        df = pd.merge(df_d, df_b[['caixa', 'n_peixes_inicial', 'peso_medio_inicial']], on='caixa')
+        df_b_resumo = df_b[['caixa', 'n_peixes_inicial', 'peso_medio_inicial']].drop_duplicates(subset=['caixa'])
+        df = pd.merge(df_d, df_b_resumo, on='caixa', how='left')
+        
         df['caixa'] = df['caixa'].astype(str)
         
         logger.info(f"✅ Dados carregados com sucesso: {len(df)} registros")
@@ -206,17 +208,25 @@ if df is not None:
         colunas_para_limpar = ['ph', 'temp', 'od', 'cond', 'amonia', 'nitrito', 'consumo']
         df = remove_outliers_zscore(df, colunas_para_limpar)
 
+    # ---------------------------------------------------------
+    # PROTEÇÃO CONTRA VÁRIAS LEITURAS DE ÁGUA NO MESMO DIA
+    # Isolamos o consumo e mortalidade num df de "1 registro por dia por caixa"
+    # ---------------------------------------------------------
+    df_unico_dia = df.drop_duplicates(subset=['caixa', 'dia_exp']).copy()
+    
+    df_unico_dia['consumo_preenchido'] = df_unico_dia['consumo'].fillna(0)
+    df_unico_dia['consumo_acum'] = df_unico_dia.groupby('caixa')['consumo_preenchido'].cumsum()
+    df_unico_dia['mort_acum'] = df_unico_dia.groupby('caixa')['mort'].fillna(0).cumsum()
+
+    # Devolve as somas cumulativas para o df principal
+    df = pd.merge(df, df_unico_dia[['caixa', 'dia_exp', 'consumo_acum', 'mort_acum']], on=['caixa', 'dia_exp'], how='left')
+
     # Matemática da Biomassa e Índices Zootécnicos
     df['peso_est'] = df['peso_medio_inicial'] * np.exp(tce * df['dia_exp'])
-    df['mort_acum'] = df.groupby('caixa')['mort'].cumsum().fillna(0)
     df['n_peixes_atual'] = df['n_peixes_inicial'] - df['mort_acum']
     df['biomassa_est_g'] = df['peso_est'] * df['n_peixes_atual']
     df['ganho_biomassa_g'] = df['biomassa_est_g'] - (df['peso_medio_inicial'] * df['n_peixes_inicial'])
     
-    df['consumo_preenchido'] = df['consumo'].fillna(0)
-    df['consumo_acum'] = df.groupby('caixa')['consumo_preenchido'].cumsum()
-    
-    # ✅ FIX: Evita divisão por zero com validação apropriada
     df['caa_est'] = np.where(
         (df['ganho_biomassa_g'] > 0.01) & (df['ganho_biomassa_g'].notna()),
         df['consumo_acum'] / df['ganho_biomassa_g'],
@@ -229,7 +239,7 @@ if df is not None:
         np.nan
     )
 
-    # ✅ FIX: Reutilizar mesma instância de df_real sem múltiplas chamadas load_data()
+    # Lógica de Dias
     df_real = df.dropna(subset=['consumo'])
     dia_max_preenchido = int(df_real['dia_exp'].max()) if not df_real.empty else 1
     logger.info(f"Dia máximo preenchido: {dia_max_preenchido}/{DIAS_TOTAIS}")
@@ -240,7 +250,7 @@ if df is not None:
 
     dias_sel = st.sidebar.slider("Filtro de Dias", 0, dia_max_preenchido, (0, dia_max_preenchido))
     
-    # ✅ FIX: Remove NaN dos gráficos
+    # Remove NaN dos gráficos
     df_f = df[(df['tratamento'].isin(trat_sel)) & (df['dia_exp'].between(dias_sel[0], dias_sel[1]))].dropna(
         subset=['dia_exp', 'tratamento']
     )
@@ -255,8 +265,11 @@ if df is not None:
     
     for i, trat in enumerate(trat_sel):
         d_trat = df_f[df_f['tratamento'] == trat]
-        d_ontem = d_trat[d_trat['dia_exp'] == (dias_sel[1] - 1)] if dias_sel[1] > 0 else pd.DataFrame()
-        d_hoje = d_trat[d_trat['dia_exp'] == dias_sel[1]]
+        # Garante que os cálculos diários não têm linhas duplicadas
+        d_trat_unico = d_trat.drop_duplicates(subset=['caixa', 'dia_exp'])
+        
+        d_ontem = d_trat_unico[d_trat_unico['dia_exp'] == (dias_sel[1] - 1)] if dias_sel[1] > 0 else pd.DataFrame()
+        d_hoje = d_trat_unico[d_trat_unico['dia_exp'] == dias_sel[1]]
         
         m_ph = d_trat['ph'].mean()
         m_temp = d_trat['temp'].mean()
@@ -265,16 +278,16 @@ if df is not None:
         m_amonia = d_trat['amonia'].mean()
         m_nitrito = d_trat['nitrito'].mean()
         
-        cons_acumulado = d_trat['consumo_acum'].max() if not d_trat.empty else 0
+        cons_acumulado = d_trat_unico.groupby('caixa')['consumo_acum'].max().sum() if not d_trat_unico.empty else 0
         cons_hoje = d_hoje['consumo'].sum() if not d_hoje.empty else 0
         cons_ontem = d_ontem['consumo'].sum() if not d_ontem.empty else 0
         
         delta_cons = ((cons_hoje - cons_ontem) / cons_ontem * 100) if cons_ontem > 0 else 0
             
         est_restante_kg = RACAO_INICIAL.get(trat, 0) - (cons_acumulado / 1000)
-        mort_total = d_trat['mort'].sum()
+        mort_total = d_trat_unico.groupby('caixa')['mort_acum'].max().sum() if not d_trat_unico.empty else 0
         
-        dados_gemini[trat] = {"Consumo": cons_hoje, "Var_%": delta_cons, "Mort": mort_total, "Amonia": m_amonia, "OD": m_od}
+        dados_gemini[trat] = {"Consumo_Ontem": cons_ontem, "Consumo_Hoje": cons_hoje, "Var_%": delta_cons, "Mort": mort_total, "Amonia": m_amonia, "OD": m_od}
         
         with cols[i]:
             with st.container(border=True):
@@ -284,8 +297,14 @@ if df is not None:
                 st.write(f"🫧 OD: **{m_od:.2f}** | ⚡ Cond: **{m_cond:.1f}**")
                 st.write(f"☣️ Amônia: **{m_amonia:.3f}** | ☠️ Nitrito: **{m_nitrito:.3f}**")
                 st.divider()
-                st.metric("Consumo Total (g)", f"{cons_acumulado:.0f}")
-                st.metric("Consumo Diário", f"{cons_hoje:.0f} g", f"{delta_cons:.1f}%,", delta_color="normal")
+                st.metric("Consumo Total Acumulado", f"{cons_acumulado:.0f} g")
+                
+                # --- NOVO LAYOUT DO CONSUMO LADO A LADO ---
+                col_ontem, col_hoje = st.columns(2)
+                col_ontem.metric("Consumo Ontem", f"{cons_ontem:.0f} g")
+                col_hoje.metric("Consumo Hoje", f"{cons_hoje:.0f} g", f"{delta_cons:.1f}%", delta_color="normal")
+                # -------------------------------------------
+                
                 st.divider()
                 st.metric("Ração Disp. (kg)", f"{est_restante_kg:.2f}")
                 st.metric("Mortalidade Total", f"{int(mort_total)}")
@@ -367,7 +386,6 @@ if df is not None:
         with c_est1:
             p_corr = st.selectbox("Eixo X (Parâmetro):", ['amonia', 'od', 'temp', 'ph'])
             try:
-                # ✅ FIX: Completa a string incompleta (use_c[...])
                 st.plotly_chart(
                     px.scatter(df_f, x=p_corr, y="taxa_arracoamento", color="tratamento", trendline="ols", 
                               title=f"Impacto do {p_corr.upper()} no Apetite (%PV)", template="plotly_dark"),

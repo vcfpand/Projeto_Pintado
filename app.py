@@ -194,25 +194,42 @@ def calcular_nh3_toxica(amonia_total: float, ph: float, temp_c: float) -> float:
 
 def calcular_alertas(df_trat: pd.DataFrame) -> list[dict]:
     """Retorna lista de alertas críticos de qualidade da água.
-    Amônia total e NH₃ tóxica são avaliadas pelo último registro (não média).
-    Demais parâmetros usam a média do intervalo selecionado.
+    - Nitrito, amônia total e NH₃ tóxica: último valor registrado.
+    - OD, pH, temperatura, condutividade: média do intervalo selecionado.
     """
     alertas = []
+    df_sorted = df_trat.sort_values("dia_exp")
 
-    # ── Parâmetros com média ──────────────────────────────────────────
-    for param, limites in ALERTAS_AGUA.items():
+    # ── Parâmetros avaliados pela média (OD, pH, temp, cond) ─────────
+    PARAMS_MEDIA = {k: v for k, v in ALERTAS_AGUA.items() if k != "nitrito"}
+    for param, limites in PARAMS_MEDIA.items():
         if param not in df_trat.columns:
             continue
-        media = df_trat[param].mean()
-        if pd.isna(media):
+        valor = df_trat[param].mean()
+        if pd.isna(valor):
             continue
-        if "max" in limites and media > limites["max"]:
-            alertas.append({"param": limites["label"], "valor": media, "tipo": "⚠️ ALTO",  "limite": limites["max"], "nh3": False})
-        if "min" in limites and media < limites["min"]:
-            alertas.append({"param": limites["label"], "valor": media, "tipo": "⚠️ BAIXO", "limite": limites["min"], "nh3": False})
+        if "max" in limites and valor > limites["max"]:
+            alertas.append({"param": limites["label"], "valor": valor, "tipo": "⚠️ ALTO",  "limite": limites["max"], "nh3": False, "rotulo": "média"})
+        if "min" in limites and valor < limites["min"]:
+            alertas.append({"param": limites["label"], "valor": valor, "tipo": "⚠️ BAIXO", "limite": limites["min"], "nh3": False, "rotulo": "média"})
 
-    # ── Amônia Total — último valor registrado ───────────────────────
-    df_sorted = df_trat.sort_values("dia_exp")
+    # ── Nitrito — último valor registrado ────────────────────────────
+    ult_nitrito = df_sorted.dropna(subset=["nitrito"])
+    if not ult_nitrito.empty:
+        nitrito_val = ult_nitrito["nitrito"].iloc[-1]
+        dia_nit     = int(ult_nitrito["dia_exp"].iloc[-1])
+        lim_nit     = ALERTAS_AGUA["nitrito"]
+        if "max" in lim_nit and nitrito_val > lim_nit["max"]:
+            alertas.append({
+                "param": f"Nitrito — Dia {dia_nit}",
+                "valor": nitrito_val,
+                "tipo": "⚠️ ALTO",
+                "limite": lim_nit["max"],
+                "nh3": False,
+                "rotulo": "último registro",
+            })
+
+    # ── Amônia Total e NH₃ tóxica — último valor registrado ─────────
     ult_amonia = df_sorted.dropna(subset=["amonia"])
     ult_ph     = df_sorted.dropna(subset=["ph"])
     ult_temp   = df_sorted.dropna(subset=["temp"])
@@ -220,10 +237,8 @@ def calcular_alertas(df_trat: pd.DataFrame) -> list[dict]:
     if not ult_amonia.empty:
         amonia_val = ult_amonia["amonia"].iloc[-1]
         dia_ref    = int(ult_amonia["dia_exp"].iloc[-1])
-
-        # pH e temp: último valor registrado (ou médias do dia da amônia, se disponível)
-        ph_val   = ult_ph["ph"].iloc[-1]   if not ult_ph.empty   else float("nan")
-        temp_val = ult_temp["temp"].iloc[-1] if not ult_temp.empty else float("nan")
+        ph_val     = ult_ph["ph"].iloc[-1]   if not ult_ph.empty   else float("nan")
+        temp_val   = ult_temp["temp"].iloc[-1] if not ult_temp.empty else float("nan")
 
         nh3 = calcular_nh3_toxica(amonia_val, ph_val, temp_val)
 
@@ -231,24 +246,16 @@ def calcular_alertas(df_trat: pd.DataFrame) -> list[dict]:
             if nh3 >= NH3_LIMITE_CRITICO:
                 alertas.append({
                     "param": f"NH₃ Tóxica (Dia {dia_ref})",
-                    "valor": nh3,
-                    "tipo": "🔴 CRÍTICO",
-                    "limite": NH3_LIMITE_CRITICO,
-                    "nh3": True,
-                    "amonia_total": amonia_val,
-                    "ph_ref": ph_val,
-                    "temp_ref": temp_val,
+                    "valor": nh3, "tipo": "🔴 CRÍTICO",
+                    "limite": NH3_LIMITE_CRITICO, "nh3": True,
+                    "amonia_total": amonia_val, "ph_ref": ph_val, "temp_ref": temp_val,
                 })
             elif nh3 >= NH3_LIMITE_ALERTA:
                 alertas.append({
                     "param": f"NH₃ Tóxica (Dia {dia_ref})",
-                    "valor": nh3,
-                    "tipo": "⚠️ ATENÇÃO",
-                    "limite": NH3_LIMITE_ALERTA,
-                    "nh3": True,
-                    "amonia_total": amonia_val,
-                    "ph_ref": ph_val,
-                    "temp_ref": temp_val,
+                    "valor": nh3, "tipo": "⚠️ ATENÇÃO",
+                    "limite": NH3_LIMITE_ALERTA, "nh3": True,
+                    "amonia_total": amonia_val, "ph_ref": ph_val, "temp_ref": temp_val,
                 })
 
     return alertas
@@ -383,7 +390,7 @@ if trat_sel:
                         else:
                             st.warning(msg)
                     else:
-                        rotulo = "último registro" if "Amônia" in a["param"] else "média"
+                        rotulo = a.get("rotulo", "média")
                         st.warning(f"{a['tipo']} — {a['param']}: **{a['valor']:.3f}** ({rotulo}, limite: {a['limite']})")
 
 # ==========================================

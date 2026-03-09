@@ -40,7 +40,7 @@ logger.info("✅ Secrets obrigatórios validados")
 usa_gemini = False
 client = None
 
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = "gemini-2.5-flash-preview-05-20"
 
 def call_gemini_api(model, prompt):
     raise RuntimeError("Gemini não disponível")
@@ -336,9 +336,15 @@ for i, trat in enumerate(trat_sel):
     m_temp = d_trat["temp"].mean()
     m_od = d_trat["od"].mean()
     m_cond = d_trat["cond"].mean()
-    m_amonia = d_trat["amonia"].mean()
-    m_nitrito = d_trat["nitrito"].mean()
     m_sobrev = d_trat["sobrevivencia_pct"].mean()
+
+    # Amônia e nitrito: último valor registrado (não média — valores pontuais de análise)
+    _ult_amonia = d_trat_unico.dropna(subset=["amonia"]).sort_values("dia_exp")
+    _ult_nitrito = d_trat_unico.dropna(subset=["nitrito"]).sort_values("dia_exp")
+    m_amonia = _ult_amonia["amonia"].iloc[-1] if not _ult_amonia.empty else float("nan")
+    m_nitrito = _ult_nitrito["nitrito"].iloc[-1] if not _ult_nitrito.empty else float("nan")
+    dia_amonia = int(_ult_amonia["dia_exp"].iloc[-1]) if not _ult_amonia.empty else None
+    dia_nitrito = int(_ult_nitrito["dia_exp"].iloc[-1]) if not _ult_nitrito.empty else None
 
     cons_acumulado = d_trat_unico.groupby("caixa")["consumo_acum"].max().sum() if not d_trat_unico.empty else 0
     cons_hoje = d_hoje["consumo"].sum() if not d_hoje.empty else 0
@@ -352,7 +358,7 @@ for i, trat in enumerate(trat_sel):
         "Consumo_Dia_Anterior": cons_ontem,
         "Var_%": round(delta_cons, 2),
         "Mort": int(mort_total),
-        "Amonia": round(m_amonia, 3) if pd.notna(m_amonia) else "N/A",
+        "Amonia_ultimo_registro": round(m_amonia, 3) if pd.notna(m_amonia) else "N/A",
         "OD": round(m_od, 2) if pd.notna(m_od) else "N/A",
         "Sobrevivencia_%": round(m_sobrev, 1) if pd.notna(m_sobrev) else "N/A",
     }
@@ -362,14 +368,22 @@ for i, trat in enumerate(trat_sel):
         with st.container(border=True):
             st.markdown(f"<h3 style='text-align:center;color:{cor};'>{trat}</h3>", unsafe_allow_html=True)
 
-            st.markdown("**🌊 Médias Ambientais**")
+            st.markdown("**🌊 Parâmetros Ambientais**")
             c_a, c_b = st.columns(2)
             c_a.metric("pH", f"{m_ph:.2f}" if pd.notna(m_ph) else "—")
             c_b.metric("Temp (°C)", f"{m_temp:.1f}" if pd.notna(m_temp) else "—")
             c_a.metric("OD (mg/L)", f"{m_od:.2f}" if pd.notna(m_od) else "—")
             c_b.metric("Cond (µS)", f"{m_cond:.1f}" if pd.notna(m_cond) else "—")
-            c_a.metric("Amônia", f"{m_amonia:.3f}" if pd.notna(m_amonia) else "—")
-            c_b.metric("Nitrito", f"{m_nitrito:.3f}" if pd.notna(m_nitrito) else "—")
+            c_a.metric(
+                f"Amônia (D{dia_amonia})" if dia_amonia else "Amônia",
+                f"{m_amonia:.3f}" if pd.notna(m_amonia) else "—",
+                help="Último valor registrado (não média)"
+            )
+            c_b.metric(
+                f"Nitrito (D{dia_nitrito})" if dia_nitrito else "Nitrito",
+                f"{m_nitrito:.3f}" if pd.notna(m_nitrito) else "—",
+                help="Último valor registrado (não média)"
+            )
 
             st.divider()
             st.markdown(f"**🍽️ Arraçoamento ({dia_ref})**")

@@ -423,6 +423,9 @@ for i, trat in enumerate(trat_sel):
     dia_amonia = int(_ult_amonia["dia_exp"].iloc[-1]) if not _ult_amonia.empty else None
     dia_nitrito = int(_ult_nitrito["dia_exp"].iloc[-1]) if not _ult_nitrito.empty else None
 
+    # NH₃ tóxica — calculada aqui para uso tanto nos dados_gemini quanto no card
+    _nh3_card = calcular_nh3_toxica(m_amonia, m_ph, m_temp)
+
     cons_acumulado = d_trat_unico.groupby("caixa")["consumo_acum"].max().sum() if not d_trat_unico.empty else 0
     cons_hoje = d_hoje["consumo"].sum() if not d_hoje.empty else 0
     cons_ontem = d_ontem["consumo"].sum() if not d_ontem.empty else 0
@@ -452,8 +455,6 @@ for i, trat in enumerate(trat_sel):
             c_b.metric("Temp (°C)", f"{m_temp:.1f}" if pd.notna(m_temp) else "—")
             c_a.metric("OD (mg/L)", f"{m_od:.2f}" if pd.notna(m_od) else "—")
             c_b.metric("Cond (µS)", f"{m_cond:.1f}" if pd.notna(m_cond) else "—")
-            # NH₃ tóxica calculada via Emerson (último registro de amônia + ph + temp)
-            _nh3_card = calcular_nh3_toxica(m_amonia, m_ph, m_temp)
             _nh3_label = "🔴 NH₃" if (pd.notna(_nh3_card) and _nh3_card >= NH3_LIMITE_CRITICO) else                          "⚠️ NH₃" if (pd.notna(_nh3_card) and _nh3_card >= NH3_LIMITE_ALERTA) else "✅ NH₃"
 
             c_a.metric(

@@ -115,6 +115,16 @@ ALERTAS_AGUA = {
 NH3_LIMITE_ALERTA  = 0.02   # mg/L — alerta amarelo
 NH3_LIMITE_CRITICO = 0.05   # mg/L — alerta vermelho
 
+# Faixas de nitrito (NO₂⁻) para Pintado
+# 0.00       → Ideal   (verde)
+# 0.01–0.24  → Aceitável (amarelo)
+# 0.25–0.99  → Crítico  (laranja)
+# ≥ 1.00     → Perigoso (vermelho)
+NITRITO_IDEAL    = 0.0
+NITRITO_ACEIT    = 0.25
+NITRITO_CRITICO  = 0.50
+NITRITO_PERIGOSO = 1.00
+
 @st.cache_data(ttl=CACHE_TTL, show_spinner="Carregando dados do OneDrive...")
 def load_data() -> pd.DataFrame | None:
     """Carrega dados do OneDrive com validação"""
@@ -213,21 +223,39 @@ def calcular_alertas(df_trat: pd.DataFrame) -> list[dict]:
         if "min" in limites and valor < limites["min"]:
             alertas.append({"param": limites["label"], "valor": valor, "tipo": "⚠️ BAIXO", "limite": limites["min"], "nh3": False, "rotulo": "média"})
 
-    # ── Nitrito — último valor registrado ────────────────────────────
+    # ── Nitrito — último valor registrado com escala de severidade ──
     ult_nitrito = df_sorted.dropna(subset=["nitrito"])
     if not ult_nitrito.empty:
         nitrito_val = ult_nitrito["nitrito"].iloc[-1]
         dia_nit     = int(ult_nitrito["dia_exp"].iloc[-1])
-        lim_nit     = ALERTAS_AGUA["nitrito"]
-        if "max" in lim_nit and nitrito_val > lim_nit["max"]:
-            alertas.append({
-                "param": f"Nitrito — Dia {dia_nit}",
-                "valor": nitrito_val,
-                "tipo": "⚠️ ALTO",
-                "limite": lim_nit["max"],
-                "nh3": False,
-                "rotulo": "último registro",
-            })
+
+        if nitrito_val >= NITRITO_PERIGOSO:
+            tipo_nit  = "🔴 PERIGOSO"
+            faixa_nit = f"≥ {NITRITO_PERIGOSO} mg/L"
+            nivel_nit = "perigoso"
+        elif nitrito_val >= NITRITO_CRITICO:
+            tipo_nit  = "🟠 CRÍTICO"
+            faixa_nit = f"{NITRITO_CRITICO}–{NITRITO_PERIGOSO} mg/L"
+            nivel_nit = "critico"
+        elif nitrito_val >= NITRITO_ACEIT:
+            tipo_nit  = "🟡 ACEITÁVEL"
+            faixa_nit = f"{NITRITO_ACEIT}–{NITRITO_CRITICO} mg/L"
+            nivel_nit = "aceitavel"
+        else:
+            tipo_nit  = "🟢 IDEAL"
+            faixa_nit = f"< {NITRITO_ACEIT} mg/L"
+            nivel_nit = "ideal"
+
+        alertas.append({
+            "param":    f"Nitrito NO₂⁻ (Dia {dia_nit})",
+            "valor":    nitrito_val,
+            "tipo":     tipo_nit,
+            "faixa":    faixa_nit,
+            "nivel":    nivel_nit,
+            "nh3":      False,
+            "nitrito":  True,
+            "rotulo":   "último registro",
+        })
 
     # ── Amônia Total e NH₃ tóxica — último valor registrado ─────────
     ult_amonia = df_sorted.dropna(subset=["amonia"])
@@ -389,6 +417,21 @@ if trat_sel:
                             st.error(msg)
                         else:
                             st.warning(msg)
+                    elif a.get("nitrito"):
+                        msg_nit = (
+                            f"{a['tipo']} — **{a['param']}**: `{a['valor']:.3f} mg/L`  \n"
+                            f"Faixa: {a['faixa']}  \n"
+                            f"Referência: 0.00 🟢 Ideal | 0.25 🟡 Aceitável | 0.50 🟠 Crítico | ≥1.00 🔴 Perigoso"
+                        )
+                        nivel = a.get("nivel", "ideal")
+                        if nivel == "perigoso":
+                            st.error(msg_nit)
+                        elif nivel == "critico":
+                            st.warning(msg_nit)
+                        elif nivel == "aceitavel":
+                            st.info(msg_nit)
+                        else:
+                            st.success(msg_nit)
                     else:
                         rotulo = a.get("rotulo", "média")
                         st.warning(f"{a['tipo']} — {a['param']}: **{a['valor']:.3f}** ({rotulo}, limite: {a['limite']})")

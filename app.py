@@ -107,7 +107,7 @@ if df is not None:
     # ==========================================
     st.sidebar.header("⚙️ Configurações Globais")
     
-    remover_outliers = st.sidebar.toggle("Limpar Outliers (Z-Score=3)", value=False, help="Remove picos irreais de leitura.")
+    remover_outliers = st.sidebar.toggle("Limpar Outliers (Z-Score=2)", value=False, help="Remove picos irreais de leitura.")
     
     st.sidebar.divider()
     st.sidebar.header("🎯 Projeção de Abate")
@@ -286,4 +286,5 @@ if df is not None:
                             st.success(resposta_estat.text)
                         except Exception as e:
                              st.error(f"Não há variação estatística suficiente (ou todos os valores são nulos) no intervalo de dias selecionado para calcular correlações. Erro interno: {e}")
+
 

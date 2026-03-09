@@ -88,26 +88,17 @@ def load_data():
 
 df = load_data()
 
-# Função para remover outliers baseada no Z-score
-def remove_outliers_zscore_grouped(df_in, colunas_alvo, limite_z=2.5):
-    """Remove outliers calculando o Z-Score para cada coluna agrupado por 'dia_exp' e 'tratamento'."""
+# ==========================================
+# FUNÇÃO ORIGINAL DE OUTLIERS RESTAURADA
+# ==========================================
+def remove_outliers_zscore(df_in, colunas_alvo, limite_z=3):
     df_limpo = df_in.copy()
-    
     for col in colunas_alvo:
-        if col in df_limpo.columns:
-            # Calcula a média e o desvio padrão de cada parâmetro no dia e tratamento específicos
-            media_grupo = df_limpo.groupby(['dia_exp', 'tratamento'])[col].transform('mean')
-            std_grupo = df_limpo.groupby(['dia_exp', 'tratamento'])[col].transform('std')
-            
-            # Para evitar erro de divisão por zero
-            std_grupo = std_grupo.replace(0, 1e-9)
-            
-            # Calcula o Z-score
-            z_scores = np.abs((df_limpo[col] - media_grupo) / std_grupo)
-            
-            # Aplica o filtro
-            df_limpo[col] = np.where((z_scores > limite_z) & (df_limpo[col].notna()), np.nan, df_limpo[col])
-            
+        # Apenas processa se a coluna tiver dados e variância
+        if df_limpo[col].notna().any() and df_limpo[col].std() > 0:
+            z_scores = np.abs((df_limpo[col] - df_limpo[col].mean()) / df_limpo[col].std())
+            # Mantém as linhas onde o Z-score é menor que o limite OU a célula original era NaN
+            df_limpo = df_limpo[(z_scores < limite_z) | (df_limpo[col].isna())]
     return df_limpo
 
 if df is not None:
@@ -116,7 +107,7 @@ if df is not None:
     # ==========================================
     st.sidebar.header("⚙️ Configurações Globais")
     
-    remover_outliers = st.sidebar.toggle("Limpar Outliers", value=False, help="Remove leituras anómalas (Z > 2.5) avaliando o desvio padrão do tratamento no próprio dia.")
+    remover_outliers = st.sidebar.toggle("Limpar Outliers (Z-Score=3)", value=False, help="Remove picos irreais de leitura.")
     
     st.sidebar.divider()
     st.sidebar.header("🎯 Projeção de Abate")
@@ -129,9 +120,10 @@ if df is not None:
     
     trat_sel = st.sidebar.multiselect("Tratamentos", ["T00", "T10", "T20", "T30"], default=["T00", "T10", "T20", "T30"])
 
+    # Aplicação do Filtro de Outliers
     if remover_outliers:
         colunas_para_limpar = ['ph', 'temp', 'od', 'cond', 'amonia', 'nitrito', 'consumo']
-        df = remove_outliers_zscore_grouped(df, colunas_para_limpar)
+        df = remove_outliers_zscore(df, colunas_para_limpar)
 
     # Matemática da Biomassa e Índices Zootécnicos
     df['peso_est'] = df['peso_medio_inicial'] * np.exp(tce * df['dia_exp'])
@@ -140,7 +132,6 @@ if df is not None:
     df['biomassa_est_g'] = df['peso_est'] * df['n_peixes_atual']
     df['ganho_biomassa_g'] = df['biomassa_est_g'] - (df['peso_medio_inicial'] * df['n_peixes_inicial'])
     
-    # CORREÇÃO PANDAS AQUI: Preencher NaN antes do groupby ou usar sum cumulativo direto
     df['consumo_preenchido'] = df['consumo'].fillna(0)
     df['consumo_acum'] = df.groupby('caixa')['consumo_preenchido'].cumsum()
     

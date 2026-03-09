@@ -4,7 +4,6 @@ import plotly.express as px
 import numpy as np
 import requests
 from io import BytesIO
-from google import genai
 
 st.set_page_config(page_title="Pintado Dashboard - Analítico", layout="wide")
 
@@ -13,6 +12,7 @@ st.set_page_config(page_title="Pintado Dashboard - Analítico", layout="wide")
 # ==========================================
 usa_gemini = False
 try:
+    from google import genai
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         model = genai.GenerativeModel('gemini-1.5-flash')
@@ -254,4 +254,5 @@ if df is not None:
             st.subheader("Dispersão: Ambiente vs Consumo")
             p_corr = st.selectbox("Eixo X:", ['amonia', 'od', 'temp', 'ph'])
             st.plotly_chart(px.scatter(df_f, x=p_corr, y="taxa_arracoamento", color="tratamento", trendline="ols", template="plotly_dark"), use_container_width=True)
+
 

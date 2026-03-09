@@ -88,9 +88,7 @@ def load_data():
 
 df = load_data()
 
-# ==========================================
-# FUNÇÃO DE REMOÇÃO DE OUTLIERS CORRIGIDA (Z-Score Agrupado)
-# ==========================================
+# Função para remover outliers baseada no Z-score
 def remove_outliers_zscore_grouped(df_in, colunas_alvo, limite_z=2.5):
     """Remove outliers calculando o Z-Score para cada coluna agrupado por 'dia_exp' e 'tratamento'."""
     df_limpo = df_in.copy()
@@ -101,13 +99,13 @@ def remove_outliers_zscore_grouped(df_in, colunas_alvo, limite_z=2.5):
             media_grupo = df_limpo.groupby(['dia_exp', 'tratamento'])[col].transform('mean')
             std_grupo = df_limpo.groupby(['dia_exp', 'tratamento'])[col].transform('std')
             
-            # Para evitar erro de divisão por zero onde o std é 0, substituímos por um valor muito pequeno
+            # Para evitar erro de divisão por zero
             std_grupo = std_grupo.replace(0, 1e-9)
             
-            # Calcula o Z-score de cada leitura em relação ao seu grupo
+            # Calcula o Z-score
             z_scores = np.abs((df_limpo[col] - media_grupo) / std_grupo)
             
-            # Aplica o filtro: mantém se Z for menor que o limite, ou se for NaN, ou se for o primeiro dia (sem variação histórica suficiente)
+            # Aplica o filtro
             df_limpo[col] = np.where((z_scores > limite_z) & (df_limpo[col].notna()), np.nan, df_limpo[col])
             
     return df_limpo
@@ -118,7 +116,6 @@ if df is not None:
     # ==========================================
     st.sidebar.header("⚙️ Configurações Globais")
     
-    # NOVO FILTRO DE OUTLIERS
     remover_outliers = st.sidebar.toggle("Limpar Outliers", value=False, help="Remove leituras anómalas (Z > 2.5) avaliando o desvio padrão do tratamento no próprio dia.")
     
     st.sidebar.divider()
@@ -132,26 +129,26 @@ if df is not None:
     
     trat_sel = st.sidebar.multiselect("Tratamentos", ["T00", "T10", "T20", "T30"], default=["T00", "T10", "T20", "T30"])
 
-    # Aplica remoção de outliers caso o botão esteja ativo (apenas nas variáveis ambientais e consumo)
     if remover_outliers:
         colunas_para_limpar = ['ph', 'temp', 'od', 'cond', 'amonia', 'nitrito', 'consumo']
         df = remove_outliers_zscore_grouped(df, colunas_para_limpar)
 
     # Matemática da Biomassa e Índices Zootécnicos
-    # NOTA: O peso estimado e a mortalidade não são filtrados para não quebrar a lógica populacional
     df['peso_est'] = df['peso_medio_inicial'] * np.exp(tce * df['dia_exp'])
     df['mort_acum'] = df.groupby('caixa')['mort'].cumsum().fillna(0)
     df['n_peixes_atual'] = df['n_peixes_inicial'] - df['mort_acum']
     df['biomassa_est_g'] = df['peso_est'] * df['n_peixes_atual']
     df['ganho_biomassa_g'] = df['biomassa_est_g'] - (df['peso_medio_inicial'] * df['n_peixes_inicial'])
     
-    # Consumo e CAA (substituímos os NaN do consumo por zero na soma cumulativa para não perder histórico)
-    df['consumo_acum'] = df.groupby('caixa')['consumo'].fillna(0).cumsum()
+    # CORREÇÃO PANDAS AQUI: Preencher NaN antes do groupby ou usar sum cumulativo direto
+    df['consumo_preenchido'] = df['consumo'].fillna(0)
+    df['consumo_acum'] = df.groupby('caixa')['consumo_preenchido'].cumsum()
+    
     df['caa_est'] = np.where(df['ganho_biomassa_g'] > 0.01, df['consumo_acum'] / df['ganho_biomassa_g'], 0.0)
     df['taxa_arracoamento'] = (df['consumo'] / df['biomassa_est_g']) * 100
 
-    # Lógica de Dias e Progresso
-    # Usamos o dia_exp original da base não filtrada para não perder a referência do último dia
+    # Lógica de Dias
+    df_real = df.dropna(subset=['consumo'])
     dia_max_preenchido = int(load_data().dropna(subset=['consumo'])['dia_exp'].max()) if not load_data().dropna(subset=['consumo']).empty else 1
     
     st.write(f"**Progresso do Ensaio:** Dia {dia_max_preenchido} de {DIAS_TOTAIS}")
@@ -169,43 +166,42 @@ if df is not None:
     cols = st.columns(len(trat_sel)) if trat_sel else []
     dados_gemini = {} 
     
-    for i, trat in enumerate(["T00", "T10", "T20", "T30"]):
-        if trat in trat_sel:
-            d_trat = df_f[df_f['tratamento'] == trat]
-            d_ontem = d_trat[d_trat['dia_exp'] == (dias_sel[1] - 1)] if dias_sel[1] > 0 else pd.DataFrame()
-            d_hoje = d_trat[d_trat['dia_exp'] == dias_sel[1]]
+    for i, trat in enumerate(trat_sel):
+        d_trat = df_f[df_f['tratamento'] == trat]
+        d_ontem = d_trat[d_trat['dia_exp'] == (dias_sel[1] - 1)] if dias_sel[1] > 0 else pd.DataFrame()
+        d_hoje = d_trat[d_trat['dia_exp'] == dias_sel[1]]
+        
+        m_ph = d_trat['ph'].mean()
+        m_temp = d_trat['temp'].mean()
+        m_od = d_trat['od'].mean()
+        m_cond = d_trat['cond'].mean()
+        m_amonia = d_trat['amonia'].mean()
+        m_nitrito = d_trat['nitrito'].mean()
+        
+        cons_acumulado = d_trat['consumo_acum'].max() if not d_trat.empty else 0
+        cons_hoje = d_hoje['consumo'].sum() if not d_hoje.empty else 0
+        cons_ontem = d_ontem['consumo'].sum() if not d_ontem.empty else 0
+        
+        delta_cons = ((cons_hoje - cons_ontem) / cons_ontem * 100) if cons_ontem > 0 else 0
             
-            m_ph = d_trat['ph'].mean()
-            m_temp = d_trat['temp'].mean()
-            m_od = d_trat['od'].mean()
-            m_cond = d_trat['cond'].mean()
-            m_amonia = d_trat['amonia'].mean()
-            m_nitrito = d_trat['nitrito'].mean()
-            
-            cons_acumulado = d_trat['consumo_acum'].max() if not d_trat.empty else 0
-            cons_hoje = d_hoje['consumo'].sum() if not d_hoje.empty else 0
-            cons_ontem = d_ontem['consumo'].sum() if not d_ontem.empty else 0
-            
-            delta_cons = ((cons_hoje - cons_ontem) / cons_ontem * 100) if cons_ontem > 0 else 0
-                
-            est_restante_kg = RACAO_INICIAL[trat] - (cons_acumulado / 1000)
-            mort_total = d_trat['mort'].sum()
-            
-            dados_gemini[trat] = {"Consumo": cons_hoje, "Var_%": delta_cons, "Mort": mort_total, "Amonia": m_amonia, "OD": m_od}
-            
-            with cols[i]:
-                with st.container(border=True):
-                    st.markdown(f"<h3 style='text-align: center; color: #4DA8DA;'>{trat}</h3>", unsafe_allow_html=True)
-                    st.markdown("**Médias Ambientais:**")
-                    st.write(f"🧪 pH: **{m_ph:.2f}** | 🌡️ Temp: **{m_temp:.1f}**")
-                    st.write(f"🫧 OD: **{m_od:.2f}** | ⚡ Cond: **{m_cond:.1f}**")
-                    st.write(f"☣️ Amônia: **{m_amonia:.3f}** | ☠️ Nitrito: **{m_nitrito:.3f}**")
-                    st.divider()
-                    st.metric("Consumo Total (g)", f"{cons_acumulado:.0f}")
-                    st.metric("Consumo Diário", f"{cons_hoje:.0f} g", f"{delta_cons:.1f}%", delta_color="normal")
-                    st.divider()
-                    st.metric("Ração Disp. (kg)", f"{est_restante_kg:.2f}")
-                    st.metric("Mortalidade Total", f"{int(mort_total)}")
+        est_restante_kg = RACAO_INICIAL.get(trat, 0) - (cons_acumulado / 1000)
+        mort_total = d_trat['mort'].sum()
+        
+        dados_gemini[trat] = {"Consumo": cons_hoje, "Var_%": delta_cons, "Mort": mort_total, "Amonia": m_amonia, "OD": m_od}
+        
+        with cols[i]:
+            with st.container(border=True):
+                st.markdown(f"<h3 style='text-align: center; color: #4DA8DA;'>{trat}</h3>", unsafe_allow_html=True)
+                st.markdown("**Médias Ambientais:**")
+                st.write(f"🧪 pH: **{m_ph:.2f}** | 🌡️ Temp: **{m_temp:.1f}**")
+                st.write(f"🫧 OD: **{m_od:.2f}** | ⚡ Cond: **{m_cond:.1f}**")
+                st.write(f"☣️ Amônia: **{m_amonia:.3f}** | ☠️ Nitrito: **{m_nitrito:.3f}**")
+                st.divider()
+                st.metric("Consumo Total (g)", f"{cons_acumulado:.0f}")
+                st.metric("Consumo Diário", f"{cons_hoje:.0f} g", f"{delta_cons:.1f}%", delta_color="normal")
+                st.divider()
+                st.metric("Ração Disp. (kg)", f"{est_restante_kg:.2f}")
+                st.metric("Mortalidade Total", f"{int(mort_total)}")
 
     # ==========================================
     # ANÁLISE GERAL (GEMINI IA)
@@ -215,7 +211,7 @@ if df is not None:
             st.markdown("#### 🧠 Análise Geral do Experimento (Google Gemini)")
             if st.button("Gerar Relatório Zootécnico Diário", type="primary"):
                 with st.spinner("Analisando os dados coletados..."):
-                    prompt = f"""Atue como um Especialista em Aquicultura. Analise os seguintes dados do último dia avaliado para os 4 tratamentos com juvenis de Pintado: {dados_gemini}.
+                    prompt = f"""Atue como um Especialista em Aquicultura. Analise os seguintes dados do último dia avaliado para os tratamentos com juvenis de Pintado: {dados_gemini}.
                     Produza uma análise direta em 2 parágrafos:
                     1. Avalie a resposta alimentar (olhando para a variação % de consumo entre os dias). Algum tratamento reduziu o consumo abruptamente?
                     2. Avalie a sanidade e o ambiente. Há alguma correlação aparente entre as taxas de amônia/OD e a mortalidade registrada?

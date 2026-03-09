@@ -266,8 +266,8 @@ if df is not None:
         m_nitrito = d_trat['nitrito'].mean()
         
         cons_acumulado = d_trat['consumo_acum'].max() if not d_trat.empty else 0
-        cons_hoje = d_hoje['consumo'].sum() if not d_hoje.empty else 0
-        cons_ontem = d_ontem['consumo'].sum() if not d_ontem.empty else 0
+        cons_hoje = d_hoje['consumo_preenchido'].sum() if not d_hoje.empty else 0
+        cons_ontem = d_ontem['consumo_preenchido'].sum() if not d_ontem.empty else 0
         
         delta_cons = ((cons_hoje - cons_ontem) / cons_ontem * 100) if cons_ontem > 0 else 0
             

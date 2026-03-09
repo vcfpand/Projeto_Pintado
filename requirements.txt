@@ -3,3 +3,4 @@ plotly
 numpy
 openpyxl
 statsmodels
+google-genai

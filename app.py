@@ -40,7 +40,7 @@ logger.info("✅ Secrets obrigatórios validados")
 usa_gemini = False
 client = None
 
-GEMINI_MODEL = "gemini-2.5-flash-preview-05-20"
+GEMINI_MODEL = "gemini-3-flash-preview"
 
 def call_gemini_api(model, prompt):
     raise RuntimeError("Gemini não disponível")
@@ -95,7 +95,7 @@ if not st.session_state["autenticado"]:
 # ==========================================
 # 2. CONSTANTES E LEITURA DE DADOS
 # ==========================================
-st.title("🐟 Pintado — Substituição de Farinha de Peixe por *Hermetia illucens*")
+st.title("🐟 Pintado — Substituição da farinha de peixe por farinha de larvas da mosca-soldado-negro (*Hermetia illucens*) na alimentação de juvenis de pintado (*Pseudoplatystoma corruscans*)")
 st.caption("Monitoramento analítico de juvenis de *Pseudoplatystoma corruscans*")
 st.divider()
 

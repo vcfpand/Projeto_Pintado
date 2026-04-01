@@ -100,7 +100,7 @@ st.caption("Monitoramento analítico de juvenis de *Pseudoplatystoma corruscans*
 st.divider()
 
 RACAO_INICIAL = {"T00": 14.74, "T10": 12.58, "T20": 12.90, "T30": 13.51}
-DIAS_TOTAIS = 46
+DIAS_TOTAIS = 53
 CACHE_TTL = 120  # segundos
 
 # Limites de alerta para qualidade da água
